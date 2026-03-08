@@ -81,7 +81,13 @@ describe("chat.inject with missing transcript file", () => {
     // Set up a temp dir but do NOT create the transcript file — this is the
     // scenario that previously triggered "failed to write transcript: transcript
     // file not found" (ACP oneshot/run sessions where transcripts aren't pre-created).
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-chat-inject-missing-"));
+    // Resolve symlinks on the temp dir up front (e.g. /tmp -> /private/tmp on macOS).
+    // Without this, resolvePathWithinSessionsDir's safeRealpathSync on the directory
+    // produces a real path while the non-existent file candidate stays unresolved,
+    // causing path.relative to produce "../.." and trigger the sessionId fallback.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-chat-inject-missing-")),
+    );
     mockState.transcriptPath = path.join(tmpDir, "sess.jsonl");
 
     // Confirm the file really doesn't exist before the call.
@@ -112,7 +118,10 @@ describe("chat.inject with missing transcript file", () => {
   it("appends cleanly to the same transcript on a second inject after auto-creation", async () => {
     // Guards against a regression where createIfMissing: true fixes the first
     // write but a subsequent append or rotation silently fails or overwrites.
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-chat-inject-append-"));
+    // Resolve symlinks up front for the same reason as the first test.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-chat-inject-append-")),
+    );
     mockState.transcriptPath = path.join(tmpDir, "sess.jsonl");
 
     const invokeInject = async (message: string) => {
