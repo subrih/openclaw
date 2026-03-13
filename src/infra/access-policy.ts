@@ -300,6 +300,9 @@ export function resolveArgv0(command: string, cwd?: string): string | null {
     const quote = trimmed[0];
     const end = trimmed.indexOf(quote, 1);
     token = end !== -1 ? trimmed.slice(1, end) : trimmed.slice(1);
+    // Set commandRest so the env look-through below can strip the quoted argv0 and
+    // recurse into the actual script (e.g. `"/usr/bin/env" /my/script.sh` → /my/script.sh).
+    commandRest = trimmed;
   } else {
     // Progressively consume leading NAME=value env-prefix tokens before extracting argv0.
     // Using a regex that matches the full assignment including quoted values (e.g.

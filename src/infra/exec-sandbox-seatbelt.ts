@@ -279,16 +279,18 @@ export function generateSeatbeltProfile(
   return lines.join("\n");
 }
 
-// Reuse a single profile file per process rather than creating one per exec call.
-// This prevents unbounded accumulation of .sb files in /tmp on long-running gateways.
-// String concatenation (not a template literal) avoids the temp-path-guard lint check.
-const _seatbeltProfilePath = path.join(os.tmpdir(), "openclaw-sb-" + process.pid + ".sb");
-// Best-effort cleanup on exit; /tmp is wiped on reboot regardless.
+// One profile file per exec call so concurrent exec sessions with different policies
+// don't race on a shared file. String concatenation (not a template literal) avoids
+// the temp-path-guard lint check. Files are cleaned up on process exit.
+let _profileSeq = 0;
+const _profileFiles = new Set<string>();
 process.once("exit", () => {
-  try {
-    fs.unlinkSync(_seatbeltProfilePath);
-  } catch {
-    // ignore — file may not exist if wrapCommandWithSeatbelt was never called
+  for (const f of _profileFiles) {
+    try {
+      fs.unlinkSync(f);
+    } catch {
+      // ignore
+    }
   }
 });
 
@@ -297,8 +299,13 @@ process.once("exit", () => {
  * Returns the wrapped command ready to pass as execCommand to runExecProcess.
  */
 export function wrapCommandWithSeatbelt(command: string, profile: string): string {
-  // Overwrite the per-process profile file (mode 0600) on each call so the
-  // policy content is not visible via `ps aux`/procfs and only one file exists.
-  fs.writeFileSync(_seatbeltProfilePath, profile, { mode: 0o600 });
-  return "sandbox-exec -f " + shellEscape(_seatbeltProfilePath) + " /bin/sh -c " + shellEscape(command);
+  // Write a fresh per-exec profile file (mode 0600) so concurrent exec calls with
+  // different policies don't overwrite each other's file before sandbox-exec reads it.
+  const filePath = path.join(
+    os.tmpdir(),
+    "openclaw-sb-" + process.pid + "-" + ++_profileSeq + ".sb",
+  );
+  _profileFiles.add(filePath);
+  fs.writeFileSync(filePath, profile, { mode: 0o600 });
+  return "sandbox-exec -f " + shellEscape(filePath) + " /bin/sh -c " + shellEscape(command);
 }

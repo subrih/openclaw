@@ -263,12 +263,14 @@ describe("wrapCommandWithSeatbelt", () => {
     expect(result).toContain("openclaw-sb-");
   });
 
-  it("reuses a single profile file path per process (no per-call timestamp)", () => {
+  it("uses a distinct profile file per call to avoid concurrent-exec policy races", () => {
     const r1 = wrapCommandWithSeatbelt("echo 1", "(allow default)");
     const r2 = wrapCommandWithSeatbelt("echo 2", "(allow default)");
-    // Extract -f <path> from both commands — must be the same file.
+    // Each call must get its own file so overlapping execs with different profiles don't race.
     const extract = (cmd: string) => cmd.match(/-f (\S+)/)?.[1];
-    expect(extract(r1)).toBe(extract(r2));
+    expect(extract(r1)).not.toBe(extract(r2));
+    expect(extract(r1)).toContain("openclaw-sb-");
+    expect(extract(r2)).toContain("openclaw-sb-");
   });
 
   it("wraps command in /bin/sh -c", () => {

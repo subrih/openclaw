@@ -660,6 +660,15 @@ describe("resolveArgv0", () => {
     expect(result).not.toBeNull();
     expect(result).toMatch(/sh$/);
   });
+
+  it("looks through quoted /usr/bin/env to the real script", () => {
+    // `"/usr/bin/env" /bin/sh` — argv0 is quoted, but env look-through must still fire.
+    // Without this fix, commandRest was empty in the quoted branch so env look-through
+    // was skipped and the function returned /usr/bin/env instead of /bin/sh.
+    const result = resolveArgv0(`"/usr/bin/env" /bin/sh -c echo`);
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
 });
 
 // ---------------------------------------------------------------------------

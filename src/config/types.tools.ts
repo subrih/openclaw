@@ -21,7 +21,7 @@ export type ScriptPolicyEntry = {
  * Applied per-agent to read, write, and exec tool calls.
  */
 export type AccessPolicyConfig = {
-  /** Fallback permission when no rule matches. Defaults to `"rwx"` (fully open). */
+  /** Fallback permission when no rule matches. Defaults to `"---"` (deny-all) when absent. */
   default?: PermStr;
   /** Glob-pattern rules: path → permission string. Longest prefix wins. */
   rules?: Record<string, PermStr>;

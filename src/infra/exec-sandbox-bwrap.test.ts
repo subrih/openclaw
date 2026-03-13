@@ -270,14 +270,8 @@ describe("generateBwrapArgs", () => {
   it("trailing-slash rule is treated as /** and resolves to correct path", () => {
     // "/tmp/" is shorthand for "/tmp/**" — must produce the same mount target
     // and sort-order length as an explicit "/tmp/**" rule.
-    const withSlash = generateBwrapArgs(
-      { default: "---", rules: { "/tmp/": "rw-" } },
-      HOME,
-    );
-    const withGlob = generateBwrapArgs(
-      { default: "---", rules: { "/tmp/**": "rw-" } },
-      HOME,
-    );
+    const withSlash = generateBwrapArgs({ default: "---", rules: { "/tmp/": "rw-" } }, HOME);
+    const withGlob = generateBwrapArgs({ default: "---", rules: { "/tmp/**": "rw-" } }, HOME);
     const bindOf = (args: string[]) =>
       args.map((a, i) => (args[i - 1] === "--bind-try" ? a : null)).filter(Boolean);
     expect(bindOf(withSlash)).toContain("/tmp");
