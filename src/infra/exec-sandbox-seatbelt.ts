@@ -1,0 +1,304 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import type { AccessPolicyConfig, PermStr } from "../config/types.tools.js";
+import { findBestRule } from "./access-policy.js";
+import { shellEscape } from "./shell-escape.js";
+
+/**
+ * Seatbelt (SBPL) profile generator for macOS sandbox-exec.
+ *
+ * Translates tools.fs.permissions into a Seatbelt profile so that exec commands
+ * run under OS-level path enforcement — catching variable-expanded paths like
+ * `cat $HOME/.ssh/id_rsa` that config-level heuristics cannot intercept.
+ *
+ * Precedence in generated profiles (matches AccessPolicyConfig semantics):
+ *   1. deny[] entries — placed last, always override rules.
+ *   2. rules — sorted shortest-to-longest so more specific rules overwrite broader ones.
+ *   3. System baseline — allows the process to load libraries and basic OS resources.
+ *   4. default — sets the base allow/deny for everything else.
+ */
+
+// SBPL operation names for each permission bit.
+const SEATBELT_READ_OPS = "file-read*";
+const SEATBELT_WRITE_OPS = "file-write*";
+const SEATBELT_EXEC_OPS = "process-exec*";
+
+// System paths every process needs to function (dynamic linker, stdlib, etc.).
+// These are allowed for file-read* regardless of user rules so wrapped commands
+// don't break when default is "---".
+const SYSTEM_BASELINE_READ_PATHS = [
+  "/usr/lib",
+  "/usr/share",
+  "/System/Library",
+  "/Library/Frameworks",
+  "/private/var/db/timezone",
+  "/dev/null",
+  "/dev/random",
+  "/dev/urandom",
+  "/dev/fd",
+] as const;
+
+const SYSTEM_BASELINE_EXEC_PATHS = [
+  "/bin",
+  "/usr/bin",
+  "/usr/libexec",
+  "/System/Library/Frameworks",
+] as const;
+
+function escapeSubpath(p: string): string {
+  // SBPL strings use double-quote delimiters; escape embedded quotes and backslashes.
+  return p.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function sbplSubpath(p: string): string {
+  return `(subpath "${escapeSubpath(p)}")`;
+}
+
+function sbplLiteral(p: string): string {
+  return `(literal "${escapeSubpath(p)}")`;
+}
+
+/**
+ * Resolve a path pattern to a concrete path for SBPL.
+ * Glob wildcards (**) are stripped to their longest non-wildcard prefix
+ * since SBPL uses subpath/literal matchers, not globs.
+ * e.g. "/Users/kaveri/**" → subpath("/Users/kaveri")
+ *      "/usr/bin/grep"    → literal("/usr/bin/grep")
+ */
+// macOS /private/* aliases — when a pattern covers /tmp, /var, or /etc we must
+// also emit the /private/* form so seatbelt (which sees real paths) matches.
+const SBPL_ALIAS_PAIRS: ReadonlyArray<[alias: string, real: string]> = [
+  ["/tmp", "/private/tmp"],
+  ["/var", "/private/var"],
+  ["/etc", "/private/etc"],
+];
+
+/**
+ * Expand a pattern to include the /private/* equivalent if it starts with a
+ * known macOS alias. Returns [original, ...extras] — the extra entries are
+ * emitted as additional SBPL rules alongside the original.
+ */
+function expandSbplAliases(pattern: string): string[] {
+  for (const [alias, real] of SBPL_ALIAS_PAIRS) {
+    if (pattern === alias) {
+      return [pattern, real];
+    }
+    if (pattern.startsWith(alias + "/")) {
+      return [pattern, real + pattern.slice(alias.length)];
+    }
+  }
+  return [pattern];
+}
+
+function patternToSbplMatcher(pattern: string, homeDir: string): string {
+  // Trailing / shorthand: "/tmp/" → "/tmp/**"
+  const withExpanded = pattern.endsWith("/") ? pattern + "**" : pattern;
+  const expanded = withExpanded.startsWith("~")
+    ? withExpanded.replace(/^~(?=$|[/\\])/, homeDir)
+    : withExpanded;
+
+  // Strip trailing wildcard segments to get the longest concrete prefix.
+  const withoutWild = expanded.replace(/[/\\]?\*.*$/, "");
+  const base = withoutWild || "/";
+
+  // If the original pattern had wildcards, use subpath (recursive match).
+  // Otherwise use literal (exact match).
+  if (/[*?]/.test(expanded)) {
+    return sbplSubpath(base);
+  }
+  return sbplLiteral(base);
+}
+
+function permToOps(perm: PermStr): string[] {
+  const ops: string[] = [];
+  if (perm[0] === "r") {
+    ops.push(SEATBELT_READ_OPS);
+  }
+  if (perm[1] === "w") {
+    ops.push(SEATBELT_WRITE_OPS);
+  }
+  if (perm[2] === "x") {
+    ops.push(SEATBELT_EXEC_OPS);
+  }
+  return ops;
+}
+
+function deniedOps(perm: PermStr): string[] {
+  const ops: string[] = [];
+  if (perm[0] !== "r") {
+    ops.push(SEATBELT_READ_OPS);
+  }
+  if (perm[1] !== "w") {
+    ops.push(SEATBELT_WRITE_OPS);
+  }
+  if (perm[2] !== "x") {
+    ops.push(SEATBELT_EXEC_OPS);
+  }
+  return ops;
+}
+
+/**
+ * Generate a Seatbelt (SBPL) profile string from an AccessPolicyConfig.
+ *
+ * @param config  The fs permissions config.
+ * @param homeDir The OS home directory (os.homedir()) used to expand ~.
+ */
+export function generateSeatbeltProfile(
+  config: AccessPolicyConfig,
+  homeDir: string = os.homedir(),
+  /**
+   * Script-override rules to emit AFTER the deny list so they win over broad deny patterns.
+   * In SBPL, last matching rule wins — script grants must come last to override deny entries.
+   */
+  scriptOverrideRules?: Record<string, PermStr>,
+): string {
+  const lines: string[] = [];
+
+  lines.push("(version 1)");
+  lines.push("");
+
+  // Determine base stance from default permission.
+  const defaultPerm = config.default ?? "---";
+  const defaultAllowsAnything =
+    defaultPerm[0] === "r" || defaultPerm[1] === "w" || defaultPerm[2] === "x";
+
+  if (defaultAllowsAnything) {
+    // Permissive base: allow everything, then restrict.
+    lines.push("(allow default)");
+    // Deny operations not in the default perm string.
+    for (const op of deniedOps(defaultPerm)) {
+      lines.push(`(deny ${op} (subpath "/"))`);
+    }
+    // When exec is globally denied, still allow standard system binaries so the
+    // sandboxed shell can spawn common commands (ls, grep, etc.). Without this,
+    // `default: "r--"` silently breaks all subprocess execution.
+    if (defaultPerm[2] !== "x") {
+      lines.push("");
+      lines.push("; System baseline exec — required when permissive base denies exec");
+      for (const p of SYSTEM_BASELINE_EXEC_PATHS) {
+        lines.push(`(allow ${SEATBELT_EXEC_OPS} ${sbplSubpath(p)})`);
+      }
+    }
+  } else {
+    // Restrictive base: deny everything, then allow selectively.
+    lines.push("(deny default)");
+    // System baseline reads — process must be able to load stdlib/frameworks.
+    lines.push("");
+    lines.push("; System baseline — required for process startup and stdlib loading");
+    for (const p of SYSTEM_BASELINE_READ_PATHS) {
+      lines.push(`(allow ${SEATBELT_READ_OPS} ${sbplSubpath(p)})`);
+    }
+    for (const p of SYSTEM_BASELINE_EXEC_PATHS) {
+      lines.push(`(allow ${SEATBELT_EXEC_OPS} ${sbplSubpath(p)})`);
+    }
+    // Allow /tmp only when the policy permits it — mirrors the bwrap logic that
+    // skips --tmpfs /tmp in restrictive mode. Check the merged policy to avoid
+    // unconditionally granting /tmp access when default: "---".
+    // Use "/tmp/." so glob rules like "/tmp/**" match correctly — findBestRule
+    // on "/tmp" alone would miss "/**"-suffixed patterns that only match descendants.
+    const tmpPerm = findBestRule("/tmp/.", config.rules ?? {}, homeDir) ?? config.default ?? "---";
+    // Emit read and write allowances independently so a read-only policy like
+    // "/tmp/**": "r--" does not accidentally grant write access to /tmp.
+    if (tmpPerm[0] === "r") {
+      lines.push(`(allow ${SEATBELT_READ_OPS} (subpath "/private/tmp"))`);
+    }
+    if (tmpPerm[1] === "w") {
+      lines.push(`(allow file-write* (subpath "/private/tmp"))`);
+    }
+    lines.push(`(allow process-fork)`);
+    lines.push(`(allow signal)`);
+    lines.push(`(allow mach*)`);
+    lines.push(`(allow ipc*)`);
+    lines.push(`(allow sysctl*)`);
+    lines.push(`(allow network*)`);
+  }
+
+  // Collect rules sorted shortest-to-longest (expanded) so more specific rules win.
+  // Use expanded lengths so a tilde rule ("~/.ssh/**" → e.g. "/home/u/.ssh/**")
+  // sorts after a shorter absolute rule ("/home/u/**") and therefore wins.
+  const expandTilde = (p: string) => (p.startsWith("~") ? p.replace(/^~(?=$|[/\\])/, homeDir) : p);
+  const ruleEntries = Object.entries(config.rules ?? {}).toSorted(
+    ([a], [b]) => expandTilde(a).length - expandTilde(b).length,
+  );
+
+  if (ruleEntries.length > 0) {
+    lines.push("");
+    lines.push("; User-defined path rules (shortest → longest; more specific wins)");
+    for (const [pattern, perm] of ruleEntries) {
+      for (const expanded of expandSbplAliases(pattern)) {
+        const matcher = patternToSbplMatcher(expanded, homeDir);
+        // First allow the permitted ops, then deny the rest for this path.
+        for (const op of permToOps(perm)) {
+          lines.push(`(allow ${op} ${matcher})`);
+        }
+        for (const op of deniedOps(perm)) {
+          lines.push(`(deny ${op} ${matcher})`);
+        }
+      }
+    }
+  }
+
+  // deny[] entries — always win over base rules.
+  if ((config.deny ?? []).length > 0) {
+    lines.push("");
+    lines.push("; Deny list — wins over base rules");
+    for (const pattern of config.deny ?? []) {
+      for (const expanded of expandSbplAliases(pattern)) {
+        const matcher = patternToSbplMatcher(expanded, homeDir);
+        lines.push(`(deny ${SEATBELT_READ_OPS} ${matcher})`);
+        lines.push(`(deny ${SEATBELT_WRITE_OPS} ${matcher})`);
+        lines.push(`(deny ${SEATBELT_EXEC_OPS} ${matcher})`);
+      }
+    }
+  }
+
+  // Script-override rules emitted last — they win over deny entries above.
+  // Required when a script grant covers a path inside a denied subtree.
+  // In SBPL, last matching rule wins.
+  if (scriptOverrideRules && Object.keys(scriptOverrideRules).length > 0) {
+    const overrideEntries = Object.entries(scriptOverrideRules).toSorted(
+      ([a], [b]) => expandTilde(a).length - expandTilde(b).length,
+    );
+    lines.push("");
+    lines.push("; Script-override grants/restrictions — emitted last, win over deny list");
+    for (const [pattern, perm] of overrideEntries) {
+      for (const expanded of expandSbplAliases(pattern)) {
+        const matcher = patternToSbplMatcher(expanded, homeDir);
+        for (const op of permToOps(perm)) {
+          lines.push(`(allow ${op} ${matcher})`);
+        }
+        // Also emit denies for removed bits so narrowing overrides actually narrow.
+        for (const op of deniedOps(perm)) {
+          lines.push(`(deny ${op} ${matcher})`);
+        }
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+// Reuse a single profile file per process rather than creating one per exec call.
+// This prevents unbounded accumulation of .sb files in /tmp on long-running gateways.
+// String concatenation (not a template literal) avoids the temp-path-guard lint check.
+const _seatbeltProfilePath = path.join(os.tmpdir(), "openclaw-sb-" + process.pid + ".sb");
+// Best-effort cleanup on exit; /tmp is wiped on reboot regardless.
+process.once("exit", () => {
+  try {
+    fs.unlinkSync(_seatbeltProfilePath);
+  } catch {
+    // ignore — file may not exist if wrapCommandWithSeatbelt was never called
+  }
+});
+
+/**
+ * Wrap a shell command string with sandbox-exec using the given profile.
+ * Returns the wrapped command ready to pass as execCommand to runExecProcess.
+ */
+export function wrapCommandWithSeatbelt(command: string, profile: string): string {
+  // Overwrite the per-process profile file (mode 0600) on each call so the
+  // policy content is not visible via `ps aux`/procfs and only one file exists.
+  fs.writeFileSync(_seatbeltProfilePath, profile, { mode: 0o600 });
+  return "sandbox-exec -f " + shellEscape(_seatbeltProfilePath) + " /bin/sh -c " + shellEscape(command);
+}

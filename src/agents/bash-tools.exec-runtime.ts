@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
@@ -16,6 +17,13 @@ export {
   normalizeExecHost,
   normalizeExecSecurity,
 } from "../infra/exec-approvals.js";
+import type { AccessPolicyConfig } from "../config/types.tools.js";
+import { applyScriptPolicyOverride, resolveArgv0 } from "../infra/access-policy.js";
+import { isBwrapAvailable, wrapCommandWithBwrap } from "../infra/exec-sandbox-bwrap.js";
+import {
+  generateSeatbeltProfile,
+  wrapCommandWithSeatbelt,
+} from "../infra/exec-sandbox-seatbelt.js";
 import { logWarn } from "../logger.js";
 import type { ManagedRun } from "../process/supervisor/index.js";
 import { getProcessSupervisor } from "../process/supervisor/index.js";
@@ -286,6 +294,30 @@ export function emitExecSystemEvent(
   requestHeartbeatNow(scopedHeartbeatWakeOptions(sessionKey, { reason: "exec-event" }));
 }
 
+// Warn once per process when OS-level exec enforcement is unavailable and
+// access-policy permissions are configured — so operators know exec runs unconfined.
+let _bwrapUnavailableWarned = false;
+function _warnBwrapUnavailableOnce(): void {
+  if (_bwrapUnavailableWarned) {
+    return;
+  }
+  _bwrapUnavailableWarned = true;
+  console.error(
+    "[access-policy] WARNING: bwrap is not available on this Linux host — exec commands run unconfined. Install bubblewrap to enable OS-level exec enforcement.",
+  );
+}
+
+let _windowsUnconfiguredWarned = false;
+function _warnWindowsUnconfiguredOnce(): void {
+  if (_windowsUnconfiguredWarned) {
+    return;
+  }
+  _windowsUnconfiguredWarned = true;
+  console.error(
+    "[access-policy] WARNING: OS-level exec enforcement is not supported on Windows — exec commands run unconfined even when access-policy permissions are configured.",
+  );
+}
+
 export async function runExecProcess(opts: {
   command: string;
   // Execute this instead of `command` (which is kept for display/session/logging).
@@ -305,10 +337,47 @@ export async function runExecProcess(opts: {
   sessionKey?: string;
   timeoutSec: number | null;
   onUpdate?: (partialResult: AgentToolResult<ExecToolDetails>) => void;
+  /** When set, wrap the exec command with OS-level path enforcement. */
+  permissions?: AccessPolicyConfig;
 }): Promise<ExecProcessHandle> {
   const startedAt = Date.now();
   const sessionId = createSessionSlug();
-  const execCommand = opts.execCommand ?? opts.command;
+  const baseCommand = opts.execCommand ?? opts.command;
+
+  // Apply OS-level path enforcement when access-policy permissions are configured.
+  let execCommand = baseCommand;
+  if (opts.permissions && !opts.sandbox) {
+    const argv0 = resolveArgv0(baseCommand, opts.workdir) ?? baseCommand;
+    const {
+      policy: effectivePermissions,
+      overrideRules,
+      hashMismatch,
+    } = applyScriptPolicyOverride(opts.permissions, argv0);
+    if (hashMismatch) {
+      throw new Error(`exec denied: script hash mismatch for ${argv0}`);
+    }
+    if (process.platform === "darwin") {
+      const profile = generateSeatbeltProfile(effectivePermissions, os.homedir(), overrideRules);
+      execCommand = wrapCommandWithSeatbelt(baseCommand, profile);
+    } else if (process.platform === "linux") {
+      if (await isBwrapAvailable()) {
+        // Pass overrideRules separately so they are emitted AFTER deny[] mounts,
+        // giving script-specific grants precedence over base deny entries — matching
+        // the Seatbelt path where scriptOverrideRules are emitted last in the profile.
+        execCommand = wrapCommandWithBwrap(
+          baseCommand,
+          effectivePermissions,
+          os.homedir(),
+          overrideRules,
+        );
+      } else {
+        _warnBwrapUnavailableOnce();
+      }
+    } else if (process.platform === "win32") {
+      _warnWindowsUnconfiguredOnce();
+    }
+  }
+
   const supervisor = getProcessSupervisor();
   const shellRuntimeEnv: Record<string, string> = {
     ...opts.env,

@@ -1,0 +1,278 @@
+import os from "node:os";
+import { describe, expect, it } from "vitest";
+
+// Seatbelt (SBPL) path handling uses Unix forward-slash semantics.
+// Tests that assert specific HOME paths in the profile are skipped on Windows
+// where os.homedir() returns backslash paths that the generator does not emit.
+const skipOnWindows = it.skipIf(process.platform === "win32");
+import type { AccessPolicyConfig } from "../config/types.tools.js";
+import { generateSeatbeltProfile, wrapCommandWithSeatbelt } from "./exec-sandbox-seatbelt.js";
+
+const HOME = os.homedir();
+
+describe("generateSeatbeltProfile", () => {
+  it("starts with (version 1)", () => {
+    const profile = generateSeatbeltProfile({}, HOME);
+    expect(profile).toMatch(/^\(version 1\)/);
+  });
+
+  it("uses (deny default) when default is ---", () => {
+    const profile = generateSeatbeltProfile({ default: "---" }, HOME);
+    expect(profile).toContain("(deny default)");
+    expect(profile).not.toContain("(allow default)");
+  });
+
+  it("uses (allow default) when default has any permission", () => {
+    const profile = generateSeatbeltProfile({ default: "r--" }, HOME);
+    expect(profile).toContain("(allow default)");
+    expect(profile).not.toContain("(deny default)");
+  });
+
+  it("includes system baseline reads when default is ---", () => {
+    const profile = generateSeatbeltProfile({ default: "---" }, HOME);
+    expect(profile).toContain("(allow file-read*");
+    expect(profile).toContain("/usr/lib");
+    expect(profile).toContain("/System/Library");
+  });
+
+  skipOnWindows("deny list entries appear as deny file-read*, file-write*, process-exec*", () => {
+    const config: AccessPolicyConfig = {
+      deny: [`${HOME}/.ssh/**`],
+      default: "rwx",
+    };
+    const profile = generateSeatbeltProfile(config, HOME);
+    expect(profile).toContain(`(deny file-read*`);
+    expect(profile).toContain(`(deny file-write*`);
+    expect(profile).toContain(`(deny process-exec*`);
+    // Should contain the path
+    expect(profile).toContain(HOME + "/.ssh");
+  });
+
+  skipOnWindows("expands ~ in deny patterns using provided homeDir", () => {
+    const config: AccessPolicyConfig = {
+      deny: ["~/.ssh/**"],
+      default: "rwx",
+    };
+    const profile = generateSeatbeltProfile(config, HOME);
+    expect(profile).toContain(HOME + "/.ssh");
+    // Should NOT contain literal ~
+    const denySection = profile.split("; Deny list")[1] ?? "";
+    expect(denySection).not.toContain("~/.ssh");
+  });
+
+  skipOnWindows("expands ~ in rules using provided homeDir", () => {
+    const config: AccessPolicyConfig = {
+      rules: { "~/**": "rw-" },
+      default: "---",
+    };
+    const profile = generateSeatbeltProfile(config, HOME);
+    expect(profile).toContain(HOME);
+  });
+
+  it("rw- rule emits allow read+write, deny exec for that path", () => {
+    const config: AccessPolicyConfig = {
+      rules: { [`${HOME}/workspace/**`]: "rw-" },
+      default: "---",
+    };
+    const profile = generateSeatbeltProfile(config, HOME);
+    expect(profile).toContain(`(allow file-read*`);
+    expect(profile).toContain(`(allow file-write*`);
+    expect(profile).toContain(`(deny process-exec*`);
+  });
+
+  it("r-x rule emits allow read+exec, deny write for that path", () => {
+    const config: AccessPolicyConfig = {
+      rules: { "/usr/bin/**": "r-x" },
+      default: "---",
+    };
+    const profile = generateSeatbeltProfile(config, HOME);
+    const rulesSection = profile.split("; User-defined path rules")[1] ?? "";
+    expect(rulesSection).toContain("(allow file-read*");
+    expect(rulesSection).toContain("(allow process-exec*");
+    expect(rulesSection).toContain("(deny file-write*");
+  });
+
+  it("deny list section appears after rules section", () => {
+    const config: AccessPolicyConfig = {
+      rules: { [`${HOME}/**`]: "rwx" },
+      deny: [`${HOME}/.ssh/**`],
+      default: "r--",
+    };
+    const profile = generateSeatbeltProfile(config, HOME);
+    const rulesIdx = profile.indexOf("; User-defined path rules");
+    const denyIdx = profile.indexOf("; Deny list");
+    expect(rulesIdx).toBeGreaterThan(-1);
+    expect(denyIdx).toBeGreaterThan(rulesIdx);
+  });
+
+  it("handles empty config without throwing", () => {
+    expect(() => generateSeatbeltProfile({}, HOME)).not.toThrow();
+  });
+
+  it("permissive base with no exec bit includes system baseline exec paths", () => {
+    // default:"r--" emits (deny process-exec* (subpath "/")) but must also allow
+    // system binaries — otherwise ls, grep, cat all fail inside the sandbox.
+    const profile = generateSeatbeltProfile({ default: "r--" }, HOME);
+    expect(profile).toContain("(allow process-exec*");
+    expect(profile).toContain("/bin");
+    expect(profile).toContain("/usr/bin");
+  });
+
+  it("permissive base with exec bit does NOT add redundant exec baseline", () => {
+    // default:"rwx" already allows everything including exec — no extra baseline needed.
+    const profile = generateSeatbeltProfile({ default: "rwx" }, HOME);
+    // (allow default) covers exec; no separate baseline exec section needed
+    expect(profile).toContain("(allow default)");
+    expect(profile).not.toContain("System baseline exec");
+  });
+
+  skipOnWindows("script-override narrowing emits deny ops so access is actually reduced", () => {
+    // Base allows rw- on workspace; script override narrows to r-- for a subpath.
+    // Without deny ops in the override block, write would still be allowed.
+    const config: AccessPolicyConfig = {
+      rules: { [`${HOME}/workspace/**`]: "rw-" },
+      default: "---",
+    };
+    const overrideRules: Record<string, string> = { [`${HOME}/workspace/locked/**`]: "r--" };
+    const profile = generateSeatbeltProfile(config, HOME, overrideRules);
+    // The override section must deny write for the locked path.
+    const overrideSection = profile.split("Script-override")[1] ?? "";
+    expect(overrideSection).toContain("(deny file-write*");
+    expect(overrideSection).toContain(`${HOME}/workspace/locked`);
+  });
+
+  it("omits /private/tmp baseline when default is --- and no rule grants /tmp", () => {
+    // In restrictive mode without an explicit /tmp rule, /tmp should NOT be in
+    // the baseline — emitting it unconditionally would contradict default: "---".
+    const config: AccessPolicyConfig = { default: "---" };
+    const profile = generateSeatbeltProfile(config, HOME);
+    expect(profile).not.toContain(`(subpath "/private/tmp")`);
+  });
+
+  it("includes /private/tmp baseline when a rule grants read access to /tmp", () => {
+    const config: AccessPolicyConfig = {
+      default: "---",
+      rules: { "/tmp/**": "rw-" },
+    };
+    const profile = generateSeatbeltProfile(config, HOME);
+    expect(profile).toContain(`(subpath "/private/tmp")`);
+  });
+
+  it("read-only /tmp rule does not grant file-write* on /private/tmp", () => {
+    // A policy of "/tmp/**": "r--" must grant reads but NOT writes to /tmp.
+    // The old code used (r || w) as the gate for both ops, so r-- inadvertently
+    // granted file-write* alongside read ops.
+    const config: AccessPolicyConfig = {
+      default: "---",
+      rules: { "/tmp/**": "r--" },
+    };
+    const profile = generateSeatbeltProfile(config, HOME);
+    // Read ops must be allowed for /tmp.
+    expect(profile).toMatch(/allow file-read[^)]*\(subpath "\/private\/tmp"\)/);
+    // Write must NOT be present for /tmp.
+    expect(profile).not.toMatch(/allow file-write\*[^)]*\(subpath "\/private\/tmp"\)/);
+  });
+
+  it("write-only /tmp rule grants file-write* but not read ops on /private/tmp", () => {
+    const config: AccessPolicyConfig = {
+      default: "---",
+      rules: { "/tmp/**": "-w-" },
+    };
+    const profile = generateSeatbeltProfile(config, HOME);
+    expect(profile).toMatch(/allow file-write\*[^)]*\(subpath "\/private\/tmp"\)/);
+    expect(profile).not.toMatch(/allow file-read[^)]*\(subpath "\/private\/tmp"\)/);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Symlink attack mitigation — profile ordering
+  //
+  // macOS Seatbelt evaluates the *resolved* (real) path at syscall time, not
+  // the symlink path. So a symlink in an allowed directory pointing to a denied
+  // target is blocked by the deny rule for the real path — but only if that
+  // deny rule appears AFTER the allow rule for the workspace in the profile
+  // (SBPL: last matching rule wins).
+  // ---------------------------------------------------------------------------
+
+  skipOnWindows(
+    "deny list for sensitive path appears after workspace allow — symlink to deny target is blocked",
+    () => {
+      // If ~/workspace/link → ~/.ssh/id_rsa, seatbelt evaluates ~/.ssh/id_rsa.
+      // The deny entry for ~/.ssh must appear after the workspace allow so it wins.
+      const config: AccessPolicyConfig = {
+        rules: { [`${HOME}/workspace/**`]: "rw-" },
+        deny: [`${HOME}/.ssh/**`],
+        default: "---",
+      };
+      const profile = generateSeatbeltProfile(config, HOME);
+      const workspaceAllowIdx = profile.indexOf("(allow file-read*");
+      const sshDenyIdx = profile.lastIndexOf("(deny file-read*");
+      expect(workspaceAllowIdx).toBeGreaterThan(-1);
+      expect(sshDenyIdx).toBeGreaterThan(workspaceAllowIdx);
+      expect(profile).toContain(`${HOME}/.ssh`);
+      expect(profile).toContain(`${HOME}/workspace`);
+    },
+  );
+
+  skipOnWindows(
+    "restrictive rule on subdir appears after broader rw rule — covers symlink to restricted subtree",
+    () => {
+      // ~/workspace/** is rw-, ~/workspace/secret/** is r--.
+      // A symlink ~/workspace/link → ~/workspace/secret/file: seatbelt sees the
+      // real path ~/workspace/secret/... which must hit the narrower r-- rule.
+      // The deny write for secret must appear after the allow write for workspace.
+      const config: AccessPolicyConfig = {
+        rules: {
+          [`${HOME}/workspace/**`]: "rw-",
+          [`${HOME}/workspace/secret/**`]: "r--",
+        },
+        default: "---",
+      };
+      const profile = generateSeatbeltProfile(config, HOME);
+      const workspaceWriteIdx = profile.indexOf("(allow file-write*");
+      const secretWriteDenyIdx = profile.lastIndexOf("(deny file-write*");
+      expect(workspaceWriteIdx).toBeGreaterThan(-1);
+      expect(secretWriteDenyIdx).toBeGreaterThan(workspaceWriteIdx);
+      expect(profile).toContain(`${HOME}/workspace/secret`);
+    },
+  );
+
+  it("glob patterns are stripped to their longest concrete prefix", () => {
+    const config: AccessPolicyConfig = {
+      deny: ["/Users/kaveri/.ssh/**"],
+      default: "rwx",
+    };
+    const profile = generateSeatbeltProfile(config, "/Users/kaveri");
+    // ** should not appear in profile — stripped to subpath
+    expect(profile).not.toContain("**");
+    expect(profile).toContain("/Users/kaveri/.ssh");
+  });
+});
+
+describe("wrapCommandWithSeatbelt", () => {
+  it("wraps command with sandbox-exec -f <tmpfile>", () => {
+    const result = wrapCommandWithSeatbelt("ls /tmp", "(version 1)\n(allow default)");
+    expect(result).toMatch(/^sandbox-exec -f /);
+    expect(result).toContain("ls /tmp");
+    // Profile content is in a temp file, not inline — not visible in ps output.
+    expect(result).not.toContain("(version 1)");
+  });
+
+  it("profile file is not embedded in the command string", () => {
+    const result = wrapCommandWithSeatbelt("echo hi", "(allow default) ; it's a test");
+    expect(result).not.toContain("it's a test");
+    expect(result).toContain("openclaw-sb-");
+  });
+
+  it("reuses a single profile file path per process (no per-call timestamp)", () => {
+    const r1 = wrapCommandWithSeatbelt("echo 1", "(allow default)");
+    const r2 = wrapCommandWithSeatbelt("echo 2", "(allow default)");
+    // Extract -f <path> from both commands — must be the same file.
+    const extract = (cmd: string) => cmd.match(/-f (\S+)/)?.[1];
+    expect(extract(r1)).toBe(extract(r2));
+  });
+
+  it("wraps command in /bin/sh -c", () => {
+    const result = wrapCommandWithSeatbelt("cat /etc/hosts", "(allow default)");
+    expect(result).toContain("/bin/sh -c");
+  });
+});

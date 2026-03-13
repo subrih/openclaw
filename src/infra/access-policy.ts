@@ -1,0 +1,418 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import type { AccessPolicyConfig, PermStr } from "../config/types.tools.js";
+import { matchesExecAllowlistPattern } from "./exec-allowlist-pattern.js";
+
+export type FsOp = "read" | "write" | "exec";
+
+const PERM_STR_RE = /^[r-][w-][x-]$/;
+
+// Track patterns already auto-expanded so the diagnostic fires once per process,
+// not once per agent turn (the policy file is re-read fresh on every turn).
+const _autoExpandedWarned = new Set<string>();
+
+/** Reset the one-time auto-expand warning set. Only for use in tests. */
+export function _resetAutoExpandedWarnedForTest(): void {
+  _autoExpandedWarned.clear();
+}
+
+/**
+ * Validates and normalizes an AccessPolicyConfig for well-formedness.
+ * Returns an array of human-readable diagnostic strings; empty = valid.
+ * May mutate config.rules and config.deny in place (e.g. auto-expanding bare directory paths).
+ */
+export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[] {
+  const errors: string[] = [];
+
+  if (config.default !== undefined && !PERM_STR_RE.test(config.default)) {
+    errors.push(
+      `access-policy.default "${config.default}" is invalid: must be exactly 3 chars (e.g. "rwx", "r--", "---")`,
+    );
+  }
+
+  if (config.rules) {
+    for (const [pattern, perm] of Object.entries(config.rules)) {
+      if (!pattern) {
+        errors.push("access-policy.rules: rule key must be a non-empty glob pattern");
+      }
+      if (!PERM_STR_RE.test(perm)) {
+        errors.push(
+          `access-policy.rules["${pattern}"] "${perm}" is invalid: must be exactly 3 chars (e.g. "rwx", "r--", "---")`,
+        );
+      }
+      // If a bare path (no glob metacharacters, no trailing /) points to a real
+      // directory it would match only the directory entry itself, not its
+      // contents. Auto-expand to "/**" and notify — the fix is unambiguous.
+      // Any stat failure means the agent faces the same error (ENOENT/EACCES),
+      // so the rule is a no-op and no action is needed.
+      if (pattern && !pattern.endsWith("/") && !/[*?[]/.test(pattern)) {
+        const expanded = pattern.startsWith("~")
+          ? pattern.replace(/^~(?=$|\/)/, os.homedir())
+          : pattern;
+        try {
+          if (fs.statSync(expanded).isDirectory()) {
+            const fixed = `${pattern}/**`;
+            // Only write the expanded key if no explicit glob for this path already
+            // exists — overwriting an existing "/**" rule would silently widen access
+            // (e.g. {"/tmp":"rwx","/tmp/**":"---"} would become {"/tmp/**":"rwx"}).
+            if (!(fixed in config.rules)) {
+              config.rules[fixed] = perm;
+            }
+            delete config.rules[pattern];
+            if (!_autoExpandedWarned.has(pattern)) {
+              _autoExpandedWarned.add(pattern);
+              errors.push(
+                `access-policy.rules["${pattern}"] is a directory — rule auto-expanded to "${fixed}" so it covers all contents.`,
+              );
+            }
+          }
+        } catch {
+          // Path inaccessible or missing — no action needed.
+        }
+      }
+    }
+  }
+
+  if (config.deny) {
+    for (let i = 0; i < config.deny.length; i++) {
+      const pattern = config.deny[i];
+      if (!pattern) {
+        errors.push(`access-policy.deny[${i}] must be a non-empty glob pattern`);
+        continue;
+      }
+      // Same bare-directory auto-expand as rules: "~/.ssh" → "~/.ssh/**" so the
+      // entire directory is denied, not just the directory entry itself.
+      if (!pattern.endsWith("/") && !/[*?[]/.test(pattern)) {
+        const expanded = pattern.startsWith("~")
+          ? pattern.replace(/^~(?=$|\/)/, os.homedir())
+          : pattern;
+        try {
+          if (fs.statSync(expanded).isDirectory()) {
+            const fixed = `${pattern}/**`;
+            config.deny[i] = fixed;
+            if (!_autoExpandedWarned.has(`deny:${pattern}`)) {
+              _autoExpandedWarned.add(`deny:${pattern}`);
+              errors.push(
+                `access-policy.deny["${pattern}"] is a directory — entry auto-expanded to "${fixed}" so it covers all contents.`,
+              );
+            }
+          }
+        } catch {
+          // Path inaccessible or missing — no action needed.
+        }
+      }
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Normalize and expand a config pattern before matching:
+ *   - Trailing "/" is shorthand for "/**" (everything under this directory).
+ *     e.g. "/tmp/" → "/tmp/**", "~/" → "~/**"
+ *   - Leading "~" is expanded to the OS home directory.
+ *
+ * We intentionally use os.homedir() rather than expandHomePrefix() so that
+ * OPENCLAW_HOME does not redirect ~ to the OpenClaw config directory.
+ */
+function expandPattern(pattern: string, homeDir: string): string {
+  // Trailing / shorthand: "/tmp/" → "/tmp/**"
+  const normalized = pattern.endsWith("/") ? pattern + "**" : pattern;
+  if (!normalized.startsWith("~")) {
+    return normalized;
+  }
+  return normalized.replace(/^~(?=$|[/\\])/, homeDir);
+}
+
+/**
+ * macOS maps several traditional Unix root directories to /private/* via symlinks.
+ * Kernel-level enforcement (seatbelt) sees the real /private/* paths, but users
+ * naturally write /tmp, /var, /etc in their config.
+ *
+ * We normalize the target path to its "friendly" alias before matching so that
+ * /private/tmp/foo is treated as /tmp/foo everywhere — no need to write both.
+ *
+ * Only applied on darwin; on other platforms the map is empty (no-op).
+ */
+const MACOS_PRIVATE_ALIASES: ReadonlyArray<[real: string, alias: string]> =
+  process.platform === "darwin"
+    ? [
+        ["/private/tmp", "/tmp"],
+        ["/private/var", "/var"],
+        ["/private/etc", "/etc"],
+      ]
+    : [];
+
+function normalizePlatformPath(p: string): string {
+  for (const [real, alias] of MACOS_PRIVATE_ALIASES) {
+    if (p === real) {
+      return alias;
+    }
+    if (p.startsWith(real + "/")) {
+      return alias + p.slice(real.length);
+    }
+  }
+  return p;
+}
+
+// Maps operation to its index in the rwx permission string.
+const OP_INDEX: Record<FsOp, number> = {
+  read: 0,
+  write: 1,
+  exec: 2,
+};
+
+// The exact character that grants each operation. Any other character (including
+// typos like "1", "y", "R") is treated as deny — fail-closed on malformed input.
+const OP_GRANT_CHAR: Record<FsOp, string> = {
+  read: "r",
+  write: "w",
+  exec: "x",
+};
+
+/**
+ * Returns true if the given permission string grants the requested operation.
+ * An absent or malformed string is treated as "---" (deny all).
+ * Only the exact grant character ("r"/"w"/"x") is accepted — any other value
+ * including typos fails closed rather than accidentally granting access.
+ */
+function permAllows(perm: PermStr | undefined, op: FsOp): boolean {
+  if (!perm) {
+    return false;
+  }
+  return perm[OP_INDEX[op]] === OP_GRANT_CHAR[op];
+}
+
+/**
+ * Finds the most specific matching rule for targetPath using longest-glob-wins.
+ * Returns the permission string for that rule, or null if nothing matches.
+ */
+export function findBestRule(
+  targetPath: string,
+  rules: Record<string, PermStr>,
+  homeDir: string = os.homedir(),
+): PermStr | null {
+  let bestPerm: PermStr | null = null;
+  let bestLen = -1;
+
+  for (const [pattern, perm] of Object.entries(rules)) {
+    // Normalize the expanded pattern so /private/tmp/** matches /tmp/** on macOS.
+    const expanded = normalizePlatformPath(expandPattern(pattern, homeDir));
+    if (matchesExecAllowlistPattern(expanded, targetPath)) {
+      // Longer *expanded* pattern = more specific. Compare expanded lengths so
+      // a tilde rule like "~/.ssh/**" (expanded: "/home/user/.ssh/**", 20 chars)
+      // correctly beats a broader absolute rule like "/home/user/**" (14 chars).
+      if (expanded.length > bestLen) {
+        bestLen = expanded.length;
+        bestPerm = perm;
+      }
+    }
+  }
+
+  return bestPerm;
+}
+
+/**
+ * Checks whether a given operation on targetPath is permitted by the config.
+ *
+ * Precedence:
+ *   1. deny[] — any matching glob always blocks, no override.
+ *   2. rules  — longest matching glob wins; check the relevant bit.
+ *   3. default — catch-all (treated as "---" when absent).
+ */
+export function checkAccessPolicy(
+  targetPath: string,
+  op: FsOp,
+  config: AccessPolicyConfig,
+  homeDir: string = os.homedir(),
+): "allow" | "deny" {
+  // Expand leading ~ in targetPath so callers don't have to pre-expand tilde paths.
+  const expandedTarget = targetPath.startsWith("~")
+    ? targetPath.replace(/^~(?=$|\/)/, homeDir)
+    : targetPath;
+  // Normalize /private/tmp → /tmp etc. so macOS symlink aliases are transparent.
+  const normalizedPath = normalizePlatformPath(expandedTarget);
+  // For directory-level checks (e.g. mkdir), also try path + "/" so that a
+  // trailing-/ rule ("~/.openclaw/heartbeat/" → "/**") covers the directory
+  // itself and not only its descendants.
+  const normalizedPathDir = normalizedPath + "/";
+
+  function matchesPattern(expanded: string): boolean {
+    return (
+      matchesExecAllowlistPattern(expanded, normalizedPath) ||
+      matchesExecAllowlistPattern(expanded, normalizedPathDir)
+    );
+  }
+
+  // 1. deny list always wins.
+  for (const pattern of config.deny ?? []) {
+    // Normalize so /private/tmp/** patterns match /tmp/** targets on macOS.
+    const expanded = normalizePlatformPath(expandPattern(pattern, homeDir));
+    if (matchesPattern(expanded)) {
+      return "deny";
+    }
+  }
+
+  // 2. rules — longest match wins (check both path and path + "/" variants).
+  let bestPerm: PermStr | null = null;
+  let bestLen = -1;
+  for (const [pattern, perm] of Object.entries(config.rules ?? {})) {
+    // Normalize so /private/tmp/** patterns match /tmp/** targets on macOS.
+    const expanded = normalizePlatformPath(expandPattern(pattern, homeDir));
+    if (matchesPattern(expanded) && expanded.length > bestLen) {
+      bestLen = expanded.length;
+      bestPerm = perm;
+    }
+  }
+  if (bestPerm !== null) {
+    return permAllows(bestPerm, op) ? "allow" : "deny";
+  }
+
+  // 3. default catch-all (absent = "---" = deny all).
+  return permAllows(config.default, op) ? "allow" : "deny";
+}
+
+/**
+ * Extract and resolve the argv[0] token from a shell command string.
+ *
+ * Handles leading-quoted paths ("..." and '...') and simple unquoted tokens.
+ * Expands ~ to os.homedir(). Resolves relative paths against cwd.
+ * Follows symlinks via realpathSync so the result matches an absolute-path key.
+ *
+ * Returns null when the command is empty or the path cannot be determined.
+ */
+export function resolveArgv0(command: string, cwd?: string): string | null {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return null;
+  }
+  // Extract the first token, respecting simple leading quotes.
+  // Skip leading shell env-prefix assignments (e.g. FOO=1 /script.sh → /script.sh)
+  // so that script policy lookups and sha256 checks are not bypassed by prefixed envs.
+  let token: string;
+  // commandRest holds the tail of the command string after argv0 — used to look
+  // through `env` invocations where the real script follows the launcher.
+  let commandRest = "";
+  if (trimmed[0] === '"' || trimmed[0] === "'") {
+    const quote = trimmed[0];
+    const end = trimmed.indexOf(quote, 1);
+    token = end !== -1 ? trimmed.slice(1, end) : trimmed.slice(1);
+  } else {
+    // Progressively consume leading NAME=value env-prefix tokens before extracting argv0.
+    // Using a regex that matches the full assignment including quoted values (e.g.
+    // FOO='a b') prevents misparse when a quoted env value contains spaces — a naive
+    // whitespace-split would break FOO='a b' /script.sh into ["FOO='a", "b'", "/script.sh"]
+    // and incorrectly treat "b'" as the argv0, bypassing script policy lookups.
+    const envPrefixRe = /^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s*/;
+    let rest = trimmed;
+    while (envPrefixRe.test(rest)) {
+      rest = rest.replace(envPrefixRe, "");
+    }
+    const raw = rest.split(/\s+/)[0] ?? "";
+    // If the argv0 token is quoted (e.g. FOO=1 "/opt/my script.sh"), strip quotes.
+    if (raw[0] === '"' || raw[0] === "'") {
+      const quote = raw[0];
+      const end = rest.indexOf(quote, 1);
+      token = end !== -1 ? rest.slice(1, end) : rest.slice(1);
+    } else {
+      token = raw;
+    }
+    commandRest = rest;
+  }
+  if (!token) {
+    return null;
+  }
+  // Expand leading ~
+  if (token.startsWith("~")) {
+    token = token.replace(/^~(?=$|\/)/, os.homedir());
+  }
+  // Resolve relative paths against cwd
+  if (!path.isAbsolute(token)) {
+    if (!cwd) {
+      return null;
+    }
+    token = path.resolve(cwd, token);
+  }
+  // Follow symlinks so keys always refer to the real file
+  try {
+    token = fs.realpathSync(token);
+  } catch {
+    // token stays as-is
+  }
+
+  // If the resolved binary is `env` (e.g. `env FOO=1 /script.sh`), look past it
+  // to the actual script so script-policy lookups and sha256 checks are not bypassed
+  // by prepending `env`. Recurse so the inner command gets the same full treatment
+  // (NAME=value stripping, quoting, cwd-relative resolution, symlink following).
+  if (path.basename(token) === "env" && commandRest) {
+    const afterEnv = commandRest.replace(/^\S+\s*/, "");
+    return afterEnv ? resolveArgv0(afterEnv, cwd) : null;
+  }
+
+  return token;
+}
+
+/**
+ * Apply a per-script policy overlay to the base agent policy.
+ *
+ * Looks up resolvedArgv0 in policy.scripts. If found:
+ *   - verifies sha256 when set (returns hashMismatch=true on failure → caller should deny exec)
+ *   - merges grant over base rules (override key wins)
+ *   - appends restrict.deny to base deny (additive)
+ *   - strips the scripts block from the result so the overlay doesn't apply to future
+ *     unrelated exec calls in the same agent turn (seatbelt/bwrap still covers the full
+ *     subprocess tree of the wrapped command at the OS level — that is correct behavior)
+ *
+ * Returns the base policy unchanged when no matching script entry exists.
+ */
+export function applyScriptPolicyOverride(
+  policy: AccessPolicyConfig,
+  resolvedArgv0: string,
+): { policy: AccessPolicyConfig; overrideRules?: Record<string, PermStr>; hashMismatch?: true } {
+  const override = policy.scripts?.[resolvedArgv0];
+  if (!override) {
+    return { policy };
+  }
+
+  // Verify sha256 when configured — reduces script swap risk.
+  // Known limitation: there is an inherent TOCTOU window between the hash read
+  // here and the kernel exec() call. An attacker who can swap the file between
+  // these two moments could run a different payload under the per-script policy.
+  // Fully closing this would require atomic open-and-exec (e.g. execveat + memfd)
+  // which is not available in Node.js userspace. This check is a best-effort guard,
+  // not a cryptographic guarantee. Use OS-level filesystem permissions to restrict
+  // who can modify script files for stronger protection.
+  if (override.sha256) {
+    let actualHash: string;
+    try {
+      const contents = fs.readFileSync(resolvedArgv0);
+      actualHash = crypto.createHash("sha256").update(contents).digest("hex");
+    } catch {
+      return { policy, hashMismatch: true };
+    }
+    if (actualHash !== override.sha256) {
+      return { policy, hashMismatch: true };
+    }
+  }
+
+  // Build the merged policy WITHOUT the override rules merged in.
+  // Override rules are returned separately so the caller can emit them AFTER
+  // the deny list in the seatbelt profile (last-match-wins — grants must come
+  // after deny entries to override broad deny patterns like ~/.secrets/**).
+  const { scripts: _scripts, ...base } = policy;
+  const merged: AccessPolicyConfig = {
+    ...base,
+    deny: [...(base.deny ?? []), ...(override.deny ?? [])],
+  };
+  if (merged.deny?.length === 0) {
+    delete merged.deny;
+  }
+  return {
+    policy: merged,
+    overrideRules:
+      override.rules && Object.keys(override.rules).length > 0 ? override.rules : undefined,
+  };
+}
