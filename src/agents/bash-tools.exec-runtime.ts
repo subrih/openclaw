@@ -18,7 +18,11 @@ export {
   normalizeExecSecurity,
 } from "../infra/exec-approvals.js";
 import type { AccessPolicyConfig } from "../config/types.tools.js";
-import { applyScriptPolicyOverride, resolveArgv0 } from "../infra/access-policy.js";
+import {
+  applyScriptPolicyOverride,
+  checkAccessPolicy,
+  resolveArgv0,
+} from "../infra/access-policy.js";
 import { isBwrapAvailable, wrapCommandWithBwrap } from "../infra/exec-sandbox-bwrap.js";
 import {
   generateSeatbeltProfile,
@@ -355,6 +359,12 @@ export async function runExecProcess(opts: {
     } = applyScriptPolicyOverride(opts.permissions, argv0);
     if (hashMismatch) {
       throw new Error(`exec denied: script hash mismatch for ${argv0}`);
+    }
+    // Tool-layer exec path check — defense-in-depth for platforms where OS-level
+    // enforcement (seatbelt/bwrap) is unavailable (Linux without bwrap, Windows).
+    // Mirrors the checkAccessPolicy calls in read/write tools for consistency.
+    if (checkAccessPolicy(argv0, "exec", effectivePermissions) === "deny") {
+      throw new Error(`exec denied by access policy: ${argv0}`);
     }
     if (process.platform === "darwin") {
       const profile = generateSeatbeltProfile(effectivePermissions, os.homedir(), overrideRules);

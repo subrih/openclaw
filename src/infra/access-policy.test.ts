@@ -669,6 +669,45 @@ describe("resolveArgv0", () => {
     expect(result).not.toBeNull();
     expect(result).toMatch(/sh$/);
   });
+
+  it("looks through env -i flag to reach the real script", () => {
+    // `env -i /bin/sh` — without fix, recurses on `-i /bin/sh` and resolves `-i` as argv0.
+    const result = resolveArgv0("env -i /bin/sh -c echo");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("looks through env --ignore-environment long flag", () => {
+    const result = resolveArgv0("env --ignore-environment /bin/sh -c echo");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("looks through env -u VAR (option that consumes next token)", () => {
+    const result = resolveArgv0("env -u HOME /bin/sh -c echo");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("looks through env -- end-of-options marker", () => {
+    const result = resolveArgv0("env -- /bin/sh -c echo");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("resolves bare binary name via PATH rather than cwd", () => {
+    // `sh` with no `/` should find /bin/sh on PATH, not <cwd>/sh.
+    // Without fix, path.resolve(cwd, "sh") produces <cwd>/sh which doesn't exist.
+    const result = resolveArgv0("sh -c echo", "/nonexistent/cwd");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+    expect(result).not.toContain("/nonexistent/cwd");
+  });
+
+  it("still resolves explicitly relative tokens (./foo) against cwd", () => {
+    // `./script.py` contains `/` so PATH lookup is skipped — cwd resolution applies.
+    expect(resolveArgv0("./script.py", undefined)).toBeNull(); // no cwd → null
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -281,7 +281,9 @@ export function generateSeatbeltProfile(
 
 // One profile file per exec call so concurrent exec sessions with different policies
 // don't race on a shared file. String concatenation (not a template literal) avoids
-// the temp-path-guard lint check. Files are cleaned up on process exit.
+// the temp-path-guard lint check. Files accumulate at the rate of exec calls and are
+// cleaned up on graceful exit. On SIGKILL the files are not removed, but /tmp is
+// wiped on reboot — an acceptable tradeoff vs re-introducing the single-file race.
 let _profileSeq = 0;
 const _profileFiles = new Set<string>();
 process.once("exit", () => {

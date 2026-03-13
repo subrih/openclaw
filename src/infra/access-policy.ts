@@ -276,6 +276,27 @@ export function checkAccessPolicy(
 }
 
 /**
+ * Search PATH for a bare binary name, returning the first executable found.
+ * Returns null when not found. The caller applies realpathSync afterwards.
+ */
+function findOnPath(name: string): string | null {
+  const pathEnv = process.env.PATH ?? "";
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) {
+      continue;
+    }
+    const candidate = path.join(dir, name);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // not in this dir
+    }
+  }
+  return null;
+}
+
+/**
  * Extract and resolve the argv[0] token from a shell command string.
  *
  * Handles leading-quoted paths ("..." and '...') and simple unquoted tokens.
@@ -332,12 +353,26 @@ export function resolveArgv0(command: string, cwd?: string): string | null {
   if (token.startsWith("~")) {
     token = token.replace(/^~(?=$|\/)/, os.homedir());
   }
-  // Resolve relative paths against cwd
+  // Resolve relative paths. For bare names with no path separator (e.g. "deploy.sh"),
+  // try PATH lookup first so script-policy keys match the real on-PATH binary rather
+  // than <cwd>/deploy.sh. Explicitly relative tokens (./foo, ../foo) contain a separator
+  // and are resolved against cwd only, matching the shell's own behaviour.
   if (!path.isAbsolute(token)) {
-    if (!cwd) {
+    const hasPathSep = token.includes("/") || token.includes("\\");
+    if (!hasPathSep) {
+      const onPath = findOnPath(token);
+      if (onPath) {
+        token = onPath;
+      } else if (cwd) {
+        token = path.resolve(cwd, token);
+      } else {
+        return null;
+      }
+    } else if (cwd) {
+      token = path.resolve(cwd, token);
+    } else {
       return null;
     }
-    token = path.resolve(cwd, token);
   }
   // Follow symlinks so keys always refer to the real file
   try {
@@ -351,7 +386,28 @@ export function resolveArgv0(command: string, cwd?: string): string | null {
   // by prepending `env`. Recurse so the inner command gets the same full treatment
   // (NAME=value stripping, quoting, cwd-relative resolution, symlink following).
   if (path.basename(token) === "env" && commandRest) {
-    const afterEnv = commandRest.replace(/^\S+\s*/, "");
+    // Strip the env/"/usr/bin/env" token itself from commandRest.
+    let afterEnv = commandRest.replace(/^\S+\s*/, "");
+    // Skip env options and their arguments so `env -i /script.sh` resolves to
+    // /script.sh rather than treating `-i` as argv0. Short options that consume
+    // the next token as their argument (-u VAR, -C DIR, -S STR) are handled
+    // explicitly; all other flags (e.g. -i, --ignore-environment) are single tokens.
+    // NAME=value pairs are handled naturally when we recurse into resolveArgv0.
+    const envOptWithArgRe =
+      /^(-[uCS]|--(unset|chdir|split-string|block-signal|default-signal|ignore-signal))\s+/;
+    while (afterEnv) {
+      if (afterEnv === "--" || afterEnv.startsWith("-- ")) {
+        afterEnv = afterEnv.slice(2).trimStart();
+        break; // -- terminates env options; what follows is the command
+      }
+      if (envOptWithArgRe.test(afterEnv)) {
+        afterEnv = afterEnv.replace(/^\S+\s+\S+\s*/, ""); // strip option + its arg
+      } else if (afterEnv[0] === "-") {
+        afterEnv = afterEnv.replace(/^\S+\s*/, ""); // strip standalone flag
+      } else {
+        break; // first non-option token — may still be NAME=value, handled by recursion
+      }
+    }
     return afterEnv ? resolveArgv0(afterEnv, cwd) : null;
   }
 
