@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -91,7 +92,7 @@ function expandSbplAliases(pattern: string): string[] {
   return [pattern];
 }
 
-function patternToSbplMatcher(pattern: string, homeDir: string): string {
+function patternToSbplMatcher(pattern: string, homeDir: string): string | null {
   // Trailing / shorthand: "/tmp/" → "/tmp/**"
   const withExpanded = pattern.endsWith("/") ? pattern + "**" : pattern;
   const expanded = withExpanded.startsWith("~")
@@ -105,6 +106,14 @@ function patternToSbplMatcher(pattern: string, homeDir: string): string {
   // If the original pattern had wildcards, use subpath (recursive match).
   // Otherwise use literal (exact match).
   if (/[*?]/.test(expanded)) {
+    // Guard against mid-path wildcards (e.g. /home/*/workspace/**): stripping from
+    // the first * would produce /home and silently grant access to all of /home.
+    // bwrap skips these patterns too — return null so callers can skip emission.
+    const wildcardIdx = expanded.search(/[*?[]/);
+    const afterWildcard = expanded.slice(wildcardIdx + 1);
+    if (/[/\\]/.test(afterWildcard)) {
+      return null;
+    }
     return sbplSubpath(base);
   }
   return sbplLiteral(base);
@@ -228,6 +237,9 @@ export function generateSeatbeltProfile(
     for (const [pattern, perm] of ruleEntries) {
       for (const expanded of expandSbplAliases(pattern)) {
         const matcher = patternToSbplMatcher(expanded, homeDir);
+        if (!matcher) {
+          continue;
+        } // skip mid-path wildcards — prefix would be too broad
         // First allow the permitted ops, then deny the rest for this path.
         for (const op of permToOps(perm)) {
           lines.push(`(allow ${op} ${matcher})`);
@@ -246,6 +258,9 @@ export function generateSeatbeltProfile(
     for (const pattern of config.deny ?? []) {
       for (const expanded of expandSbplAliases(pattern)) {
         const matcher = patternToSbplMatcher(expanded, homeDir);
+        if (!matcher) {
+          continue;
+        }
         lines.push(`(deny ${SEATBELT_READ_OPS} ${matcher})`);
         lines.push(`(deny ${SEATBELT_WRITE_OPS} ${matcher})`);
         lines.push(`(deny ${SEATBELT_EXEC_OPS} ${matcher})`);
@@ -265,6 +280,9 @@ export function generateSeatbeltProfile(
     for (const [pattern, perm] of overrideEntries) {
       for (const expanded of expandSbplAliases(pattern)) {
         const matcher = patternToSbplMatcher(expanded, homeDir);
+        if (!matcher) {
+          continue;
+        }
         for (const op of permToOps(perm)) {
           lines.push(`(allow ${op} ${matcher})`);
         }
@@ -280,11 +298,12 @@ export function generateSeatbeltProfile(
 }
 
 // One profile file per exec call so concurrent exec sessions with different policies
-// don't race on a shared file. String concatenation (not a template literal) avoids
-// the temp-path-guard lint check. Files accumulate at the rate of exec calls and are
-// cleaned up on graceful exit. On SIGKILL the files are not removed, but /tmp is
-// wiped on reboot — an acceptable tradeoff vs re-introducing the single-file race.
-let _profileSeq = 0;
+// don't race on a shared file. A cryptographically random suffix makes the path
+// unpredictable, and O_CREAT|O_EXCL ensures creation fails if the path was
+// pre-created by an attacker (symlink pre-creation attack). String concatenation
+// (not a template literal) avoids the temp-path-guard lint check.
+// Files accumulate at the rate of exec calls and are cleaned up on graceful exit;
+// on SIGKILL they remain but /tmp is wiped on reboot.
 const _profileFiles = new Set<string>();
 process.once("exit", () => {
   for (const f of _profileFiles) {
@@ -301,13 +320,20 @@ process.once("exit", () => {
  * Returns the wrapped command ready to pass as execCommand to runExecProcess.
  */
 export function wrapCommandWithSeatbelt(command: string, profile: string): string {
-  // Write a fresh per-exec profile file (mode 0600) so concurrent exec calls with
-  // different policies don't overwrite each other's file before sandbox-exec reads it.
-  const filePath = path.join(
-    os.tmpdir(),
-    "openclaw-sb-" + process.pid + "-" + ++_profileSeq + ".sb",
-  );
+  // Use a random suffix so the path is unpredictable; open with O_EXCL so the
+  // call fails if the file was pre-created (prevents symlink pre-creation attacks).
+  const rand = crypto.randomBytes(8).toString("hex");
+  const filePath = path.join(os.tmpdir(), "openclaw-sb-" + process.pid + "-" + rand + ".sb");
   _profileFiles.add(filePath);
-  fs.writeFileSync(filePath, profile, { mode: 0o600 });
+  const fd = fs.openSync(
+    filePath,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+    0o600,
+  );
+  try {
+    fs.writeSync(fd, profile);
+  } finally {
+    fs.closeSync(fd);
+  }
   return "sandbox-exec -f " + shellEscape(filePath) + " /bin/sh -c " + shellEscape(command);
 }

@@ -708,6 +708,35 @@ describe("resolveArgv0", () => {
     // `./script.py` contains `/` so PATH lookup is skipped — cwd resolution applies.
     expect(resolveArgv0("./script.py", undefined)).toBeNull(); // no cwd → null
   });
+
+  it("uses a literal PATH= env prefix override when looking up bare names", () => {
+    // PATH=/nonexistent has no $, so findOnPath uses /nonexistent — sh not found there,
+    // falls back to cwd resolution rather than the real process PATH.
+    const result = resolveArgv0("PATH=/nonexistent sh", "/some/cwd");
+    // Must NOT resolve to the real /bin/sh (which would mean process PATH was used).
+    if (result !== null) {
+      expect(result).toContain("/some/cwd");
+    }
+  });
+
+  it("ignores PATH= prefix containing shell vars and uses process PATH instead", () => {
+    // PATH=/alt:$PATH has $, so the override is skipped; sh found on process PATH.
+    const result = resolveArgv0("PATH=/alt:$PATH sh");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("strips --block-signal as a standalone flag without consuming next token", () => {
+    // --block-signal uses [=SIG] syntax — must not consume /bin/sh as its argument.
+    const result = resolveArgv0("env --block-signal /bin/sh -c echo");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("strips --default-signal and --ignore-signal as standalone flags", () => {
+    expect(resolveArgv0("env --default-signal /bin/sh")).toMatch(/sh$/);
+    expect(resolveArgv0("env --ignore-signal /bin/sh")).toMatch(/sh$/);
+  });
 });
 
 // ---------------------------------------------------------------------------

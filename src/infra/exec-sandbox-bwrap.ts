@@ -148,12 +148,11 @@ export function generateBwrapArgs(
     if (!p || p === "/") {
       continue;
     } // root already handled above
-    if (permAllowsWrite(perm) && (perm[0] === "r" || defaultPerm[0] === "r")) {
-      // Read-write bind: safe only when reads are also permitted — either the rule
-      // explicitly grants read, or the permissive base already allows reads via
-      // --ro-bind / /. A write-only rule ("-w-") under a restrictive base ("---")
-      // cannot be enforced as write-without-read at the bwrap OS layer; skip the
-      // mount so reads are not silently leaked. Tool-layer enforcement still applies.
+    if (permAllowsWrite(perm)) {
+      // Emit --bind-try for any rule that permits writes, including write-only ("-w-").
+      // bwrap cannot enforce write-without-read at the mount level; a "-w-" rule under
+      // a restrictive base will also permit reads at the OS layer. The tool layer still
+      // denies read tool calls per the rule, so the practical exposure is exec-only paths.
       args.push("--bind-try", p, p);
     } else if (defaultPerm[0] !== "r" && perm[0] === "r") {
       // Restrictive base: only bind paths that the rule explicitly allows reads on.

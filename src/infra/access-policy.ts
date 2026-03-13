@@ -279,8 +279,8 @@ export function checkAccessPolicy(
  * Search PATH for a bare binary name, returning the first executable found.
  * Returns null when not found. The caller applies realpathSync afterwards.
  */
-function findOnPath(name: string): string | null {
-  const pathEnv = process.env.PATH ?? "";
+function findOnPath(name: string, pathOverride?: string): string | null {
+  const pathEnv = pathOverride ?? process.env.PATH ?? "";
   for (const dir of pathEnv.split(path.delimiter)) {
     if (!dir) {
       continue;
@@ -317,6 +317,9 @@ export function resolveArgv0(command: string, cwd?: string): string | null {
   // commandRest holds the tail of the command string after argv0 — used to look
   // through `env` invocations where the real script follows the launcher.
   let commandRest = "";
+  // Literal PATH= override extracted from env-prefix assignments (no shell vars).
+  // Used so `PATH=/alt deploy.sh` looks up deploy.sh on /alt rather than process PATH.
+  let commandScopedPath: string | undefined;
   if (trimmed[0] === '"' || trimmed[0] === "'") {
     const quote = trimmed[0];
     const end = trimmed.indexOf(quote, 1);
@@ -333,6 +336,14 @@ export function resolveArgv0(command: string, cwd?: string): string | null {
     const envPrefixRe = /^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s*/;
     let rest = trimmed;
     while (envPrefixRe.test(rest)) {
+      // Capture a literal PATH= override; skip if the value contains $ (unexpandable).
+      const pathM = rest.match(/^PATH=(?:"([^"]*)"|'([^']*)'|(\S+))\s*/);
+      if (pathM) {
+        const val = pathM[1] ?? pathM[2] ?? pathM[3] ?? "";
+        if (!val.includes("$")) {
+          commandScopedPath = val;
+        }
+      }
       rest = rest.replace(envPrefixRe, "");
     }
     const raw = rest.split(/\s+/)[0] ?? "";
@@ -360,7 +371,7 @@ export function resolveArgv0(command: string, cwd?: string): string | null {
   if (!path.isAbsolute(token)) {
     const hasPathSep = token.includes("/") || token.includes("\\");
     if (!hasPathSep) {
-      const onPath = findOnPath(token);
+      const onPath = findOnPath(token, commandScopedPath);
       if (onPath) {
         token = onPath;
       } else if (cwd) {
@@ -393,8 +404,9 @@ export function resolveArgv0(command: string, cwd?: string): string | null {
     // the next token as their argument (-u VAR, -C DIR, -S STR) are handled
     // explicitly; all other flags (e.g. -i, --ignore-environment) are single tokens.
     // NAME=value pairs are handled naturally when we recurse into resolveArgv0.
-    const envOptWithArgRe =
-      /^(-[uCS]|--(unset|chdir|split-string|block-signal|default-signal|ignore-signal))\s+/;
+    // Short options that consume the next token as a separate argument.
+    // --block-signal, --default-signal, --ignore-signal use [=SIG] syntax (never space-separated).
+    const envOptWithArgRe = /^(-[uCS]|--(unset|chdir|split-string))\s+/;
     while (afterEnv) {
       if (afterEnv === "--" || afterEnv.startsWith("-- ")) {
         afterEnv = afterEnv.slice(2).trimStart();

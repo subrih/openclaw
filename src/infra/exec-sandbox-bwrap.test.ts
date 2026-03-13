@@ -173,10 +173,11 @@ describe("generateBwrapArgs", () => {
     expect(roBound).not.toContain(`${HOME}/scripts`);
   });
 
-  it('"-w-" rule in restrictive mode does not emit --bind-try (read leak)', () => {
-    // A write-only rule ("-w-") under default:"---" must NOT produce --bind-try
-    // because --bind-try is a read-write mount — it silently grants reads to a path
-    // the policy denies reads on. Skip the mount; tool layer enforces the write perm.
+  it('"-w-" rule in restrictive mode emits --bind-try so writes do not silently fail', () => {
+    // A write-only rule ("-w-") under default:"---" now emits --bind-try so the path
+    // exists in the bwrap namespace and writes succeed. bwrap cannot enforce
+    // write-without-read at the mount level; reads are also permitted at the OS layer,
+    // but the tool layer still denies read tool calls per the "-w-" rule.
     const config: AccessPolicyConfig = {
       default: "---",
       rules: { [`${HOME}/logs/**`]: "-w-" },
@@ -185,11 +186,7 @@ describe("generateBwrapArgs", () => {
     const bindMounts = args
       .map((a, i) => (a === "--bind-try" ? args[i + 1] : null))
       .filter(Boolean);
-    const roBound = args
-      .map((a, i) => (a === "--ro-bind-try" ? args[i + 1] : null))
-      .filter(Boolean);
-    expect(bindMounts).not.toContain(`${HOME}/logs`);
-    expect(roBound).not.toContain(`${HOME}/logs`);
+    expect(bindMounts).toContain(`${HOME}/logs`);
   });
 
   it('"-w-" rule in permissive mode emits --bind-try (write upgrade, reads already allowed)', () => {

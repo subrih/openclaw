@@ -277,4 +277,27 @@ describe("wrapCommandWithSeatbelt", () => {
     const result = wrapCommandWithSeatbelt("cat /etc/hosts", "(allow default)");
     expect(result).toContain("/bin/sh -c");
   });
+
+  it("profile file path contains a random component (not just pid+seq)", () => {
+    const extract = (cmd: string) => cmd.match(/-f (\S+)/)?.[1] ?? "";
+    const r1 = wrapCommandWithSeatbelt("echo 1", "(allow default)");
+    const r2 = wrapCommandWithSeatbelt("echo 2", "(allow default)");
+    // Path must be unpredictable — strip the pid prefix and check the random suffix varies.
+    const suffix = (p: string) => p.replace(/.*openclaw-sb-\d+-/, "").replace(".sb", "");
+    expect(suffix(extract(r1))).not.toBe(suffix(extract(r2)));
+    expect(suffix(extract(r1)).length).toBeGreaterThanOrEqual(8); // at least 4 random bytes
+  });
+});
+
+describe("generateSeatbeltProfile — mid-path wildcard guard", () => {
+  skipOnWindows("skips mid-path wildcard rules to avoid over-granting parent directory", () => {
+    // /home/*/workspace/** would truncate to /home and grant all of /home — must be skipped.
+    const profile = generateSeatbeltProfile({ rules: { "/home/*/workspace/**": "rwx" } }, HOME);
+    expect(profile).not.toContain('(subpath "/home")');
+  });
+
+  skipOnWindows("still emits trailing-** rules that have no mid-path wildcard", () => {
+    const profile = generateSeatbeltProfile({ rules: { "/tmp/**": "rwx" } }, HOME);
+    expect(profile).toContain('(subpath "/tmp")');
+  });
 });
