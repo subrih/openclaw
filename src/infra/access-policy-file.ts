@@ -190,7 +190,7 @@ export function _resetNotFoundWarnedForTest(): void {
  * deny-all for that entry (handled downstream by checkAccessPolicy's permAllows logic).
  */
 /** Deny-all policy returned when the policy file is present but broken (fail-closed). */
-const DENY_ALL_POLICY: AccessPolicyConfig = { default: "---" };
+const DENY_ALL_POLICY: AccessPolicyConfig = Object.freeze({ default: "---" });
 
 export function resolveAccessPolicyForAgent(agentId?: string): AccessPolicyConfig | undefined {
   const file = loadAccessPolicyFile();

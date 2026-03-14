@@ -282,6 +282,25 @@ describe("generateBwrapArgs", () => {
     expect(tmpfsMounts).not.toContain(`${HOME}/logs`);
   });
 
+  it("skips --tmpfs for deny[] entry that resolves to an existing file (not a directory)", () => {
+    // /etc/hosts is a file on both macOS and Linux; bwrap --tmpfs rejects file paths.
+    // The deny entry is expanded to "/etc/hosts/**" by validateAccessPolicyConfig, and
+    // patternToPath strips the "/**" back to "/etc/hosts". generateBwrapArgs must not
+    // emit "--tmpfs /etc/hosts" — it should be silently skipped.
+    const config: AccessPolicyConfig = { default: "r--", deny: ["/etc/hosts/**"] };
+    const args = generateBwrapArgs(config, HOME);
+    const tmpfsMounts = args.map((a, i) => (a === "--tmpfs" ? args[i + 1] : null)).filter(Boolean);
+    expect(tmpfsMounts).not.toContain("/etc/hosts");
+  });
+
+  it("still emits --tmpfs for deny[] entry that resolves to a directory", () => {
+    // Non-existent paths are treated as directories (forward-protection).
+    const config: AccessPolicyConfig = { default: "r--", deny: [`${HOME}/.nonexistent-dir/**`] };
+    const args = generateBwrapArgs(config, HOME);
+    const tmpfsMounts = args.map((a, i) => (a === "--tmpfs" ? args[i + 1] : null)).filter(Boolean);
+    expect(tmpfsMounts).toContain(`${HOME}/.nonexistent-dir`);
+  });
+
   it("trailing-slash rule is treated as /** and resolves to correct path", () => {
     // "/tmp/" is shorthand for "/tmp/**" — must produce the same mount target
     // and sort-order length as an explicit "/tmp/**" rule.

@@ -100,7 +100,10 @@ function patternToSbplMatcher(pattern: string, homeDir: string): string | null {
     : withExpanded;
 
   // Strip trailing wildcard segments to get the longest concrete prefix.
-  const withoutWild = expanded.replace(/[/\\]?\*.*$/, "");
+  // Both * and ? are wildcard characters in glob syntax; strip from whichever
+  // appears first so patterns like "/tmp/file?.txt" don't embed a literal ?
+  // in the SBPL literal matcher.
+  const withoutWild = expanded.replace(/[/\\]?[*?].*$/, "");
   const base = withoutWild || "/";
 
   // If the original pattern had wildcards, use subpath (recursive match).

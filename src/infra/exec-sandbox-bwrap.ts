@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs";
 import os from "node:os";
 import { promisify } from "node:util";
 import type { AccessPolicyConfig, PermStr } from "../config/types.tools.js";
@@ -171,12 +172,27 @@ export function generateBwrapArgs(
 
   // deny[] entries: overlay with empty tmpfs — path exists but is empty.
   // tmpfs overlay hides the real contents regardless of how the path was expressed.
+  // Guard: bwrap --tmpfs only accepts a directory as the mount point. deny[] entries
+  // like "~/.ssh/id_rsa" are unconditionally expanded to "~/.ssh/id_rsa/**" by
+  // validateAccessPolicyConfig and resolve back to the file path here. Passing a
+  // file to --tmpfs causes bwrap to error out ("Not a directory"). Non-existent
+  // paths are assumed to be directories (the common case for protecting future dirs).
   for (const pattern of config.deny ?? []) {
     const p = patternToPath(pattern, homeDir);
     if (!p || p === "/") {
       continue;
     }
-    args.push("--tmpfs", p);
+    let isDir = true;
+    try {
+      isDir = fs.statSync(p).isDirectory();
+    } catch {
+      // Non-existent path — assume directory (forward-protection for dirs not yet created).
+    }
+    if (isDir) {
+      args.push("--tmpfs", p);
+    }
+    // File-specific entry: tool-layer checkAccessPolicy already denies reads/writes;
+    // bwrap cannot mount tmpfs over a file so skip the OS-layer mount silently.
   }
 
   // Script-specific override mounts — emitted after deny[] so they can reopen

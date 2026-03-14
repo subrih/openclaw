@@ -234,6 +234,24 @@ describe("resolveAccessPolicyForAgent", () => {
     errSpy.mockRestore();
   });
 
+  it("deny-all policy returned on broken file is frozen — mutation does not corrupt future calls", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    writeFile({ version: 1, rules: { "/**": "r--" } }); // misplaced key — broken
+    const result = resolveAccessPolicyForAgent("subri");
+    expect(result).toEqual({ default: "---" });
+    // Attempt to mutate the returned object — must not affect the next call.
+    // If DENY_ALL_POLICY is not frozen this would silently corrupt it.
+    try {
+      (result as Record<string, unknown>)["default"] = "rwx";
+    } catch {
+      // Object.freeze throws in strict mode — that's fine too.
+    }
+    _resetNotFoundWarnedForTest();
+    const result2 = resolveAccessPolicyForAgent("subri");
+    expect(result2).toEqual({ default: "---" });
+    errSpy.mockRestore();
+  });
+
   it("returns base when no agent block exists", () => {
     writeFile({
       version: 1,

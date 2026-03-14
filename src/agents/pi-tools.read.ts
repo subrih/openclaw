@@ -864,6 +864,17 @@ function createHostEditOperations(
     return resolved;
   }
 
+  // access() checks existence only — requires read permission but not write.
+  // Using assertEditPermitted here would block existence checks on r-- paths before
+  // any write is attempted, producing a misleading "write access denied" error.
+  function assertReadPermitted(absolutePath: string): string {
+    const resolved = safeRealpath(absolutePath);
+    if (permissions && checkAccessPolicy(resolved, "read", permissions) === "deny") {
+      throw new Error(`Permission denied: read access to ${resolved} is not allowed.`);
+    }
+    return resolved;
+  }
+
   if (!workspaceOnly) {
     // When workspaceOnly is false, allow edits anywhere on the host
     return {
@@ -876,7 +887,7 @@ function createHostEditOperations(
         await writeHostFile(resolved, content);
       },
       access: async (absolutePath: string) => {
-        const resolved = assertEditPermitted(absolutePath);
+        const resolved = assertReadPermitted(absolutePath);
         await fs.access(resolved);
       },
     } as const;
@@ -904,7 +915,7 @@ function createHostEditOperations(
       });
     },
     access: async (absolutePath: string) => {
-      const resolved = assertEditPermitted(absolutePath);
+      const resolved = assertReadPermitted(absolutePath);
       let relative: string;
       try {
         relative = toRelativeWorkspacePath(resolvedRoot, resolved);

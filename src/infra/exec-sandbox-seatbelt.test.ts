@@ -300,4 +300,13 @@ describe("generateSeatbeltProfile — mid-path wildcard guard", () => {
     const profile = generateSeatbeltProfile({ rules: { "/tmp/**": "rwx" } }, HOME);
     expect(profile).toContain('(subpath "/tmp")');
   });
+
+  skipOnWindows("? wildcard is stripped correctly — no literal ? in SBPL matcher", () => {
+    // Pattern "/tmp/file?.txt" has a ? wildcard; the strip regex must remove it so
+    // the SBPL matcher does not contain a raw "?" character. Stripping "?.txt" from
+    // "/tmp/file?.txt" yields "/tmp/file" — a more precise subpath than "/tmp".
+    const profile = generateSeatbeltProfile({ rules: { "/tmp/file?.txt": "r--" } }, HOME);
+    expect(profile).not.toMatch(/\?/); // no literal ? in the emitted profile
+    expect(profile).toContain('(subpath "/tmp/file")');
+  });
 });
