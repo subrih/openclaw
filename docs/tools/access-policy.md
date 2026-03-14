@@ -130,6 +130,8 @@ For cross-agent MCP tool delegation (an orchestrator invoking a tool on behalf o
 
 **Interpreter bypass of exec bit.** The `x` bit gates `execve()` on the file itself. Running `bash script.sh` executes bash (permitted), which reads the script as text (read permitted if `r` is set). The exec bit on the script is irrelevant for interpreter-based invocations. To prevent execution of a script entirely, place it in the deny list (no read access).
 
+**File-specific `deny[]` entries on Linux (bwrap).** On Linux, `deny[]` entries are enforced at the OS layer using `bwrap --tmpfs` overlays, which only work on directories. When a `deny[]` entry resolves to an existing file (e.g. `deny: ["~/.netrc"]`), the OS-level mount is skipped — bwrap cannot overlay a file with a tmpfs. Tool-layer enforcement still blocks read/write/edit calls for that file. However, exec commands running inside the sandbox can still access the file directly (e.g. `cat ~/.netrc`). A warning is emitted to stderr when this gap is active. To enforce at the OS layer on Linux, deny the parent directory instead (e.g. `deny: ["~/.aws/"]` rather than `deny: ["~/.aws/credentials"]`). On macOS, seatbelt handles file-level denials correctly with `(deny file-read* (literal ...))`.
+
 **No approval flow.** Access policy is fail-closed: a denied operation returns an error immediately. There is no `ask`/`on-miss` mode equivalent to exec approvals. If an agent hits a denied path, it receives a permission error and must handle it. Interactive approval for filesystem access is planned as a follow-up feature.
 
 ## Related

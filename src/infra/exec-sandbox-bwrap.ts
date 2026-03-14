@@ -26,6 +26,25 @@ const SYSTEM_RO_BIND_PATHS = ["/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc",
 
 let bwrapAvailableCache: boolean | undefined;
 
+// Warn once per process when a file-specific deny[] entry cannot be enforced at
+// the OS layer (bwrap --tmpfs only accepts directories). Tool-layer enforcement
+// still applies for read/write/edit tool calls, but exec commands that access
+// the file directly inside the sandbox are not blocked at the syscall level.
+// See docs/tools/access-policy.md — "File-specific deny[] entries on Linux".
+const _bwrapFileDenyWarnedPaths = new Set<string>();
+export function _warnBwrapFileDenyOnce(filePath: string): void {
+  if (_bwrapFileDenyWarnedPaths.has(filePath)) {
+    return;
+  }
+  _bwrapFileDenyWarnedPaths.add(filePath);
+  console.error(
+    `[access-policy] bwrap: deny[] entry "${filePath}" resolves to a file — ` +
+      `OS-level (bwrap) enforcement is not applied. ` +
+      `Tool-layer enforcement still blocks read/write/edit tool calls. ` +
+      `To protect this file at the OS layer on Linux, deny its parent directory instead.`,
+  );
+}
+
 /**
  * Returns true if bwrap is installed and executable on this system.
  * Result is cached after the first call.
@@ -195,9 +214,12 @@ export function generateBwrapArgs(
     }
     if (isDir) {
       args.push("--tmpfs", p);
+    } else {
+      // File-specific entry: tool-layer checkAccessPolicy still denies read/write/edit
+      // tool calls, but exec commands inside the sandbox can still access the file
+      // directly. Warn operators so they know to deny the parent directory instead.
+      _warnBwrapFileDenyOnce(p);
     }
-    // File-specific entry: tool-layer checkAccessPolicy already denies reads/writes;
-    // bwrap cannot mount tmpfs over a file so skip the OS-layer mount silently.
   }
 
   // Script-specific override mounts — emitted after deny[] so they can reopen

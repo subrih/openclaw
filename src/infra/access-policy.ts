@@ -456,7 +456,19 @@ export function applyScriptPolicyOverride(
   policy: AccessPolicyConfig,
   resolvedArgv0: string,
 ): { policy: AccessPolicyConfig; overrideRules?: Record<string, PermStr>; hashMismatch?: true } {
-  const override = policy.scripts?.[resolvedArgv0];
+  // Normalise ~ in scripts keys so "~/bin/deploy.sh" matches the resolved absolute
+  // path "/home/user/bin/deploy.sh" that resolveArgv0 returns. A direct lookup
+  // would always miss tilde-keyed entries, silently skipping sha256 verification.
+  const scripts = policy.scripts;
+  const override = scripts
+    ? (scripts[resolvedArgv0] ??
+      Object.entries(scripts).find(([k]) => {
+        if (!k.startsWith("~")) {
+          return false;
+        }
+        return k.replace(/^~(?=$|[/\\])/, os.homedir()) === resolvedArgv0;
+      })?.[1])
+    : undefined;
   if (!override) {
     return { policy };
   }

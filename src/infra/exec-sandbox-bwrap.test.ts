@@ -1,7 +1,11 @@
 import os from "node:os";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AccessPolicyConfig } from "../config/types.tools.js";
-import { generateBwrapArgs, wrapCommandWithBwrap } from "./exec-sandbox-bwrap.js";
+import {
+  _warnBwrapFileDenyOnce,
+  generateBwrapArgs,
+  wrapCommandWithBwrap,
+} from "./exec-sandbox-bwrap.js";
 
 const HOME = os.homedir();
 
@@ -300,6 +304,19 @@ describe("generateBwrapArgs", () => {
     const args = generateBwrapArgs(config, HOME);
     const tmpfsMounts = args.map((a, i) => (a === "--tmpfs" ? args[i + 1] : null)).filter(Boolean);
     expect(tmpfsMounts).not.toContain("/etc/hosts");
+  });
+
+  it("emits a console.error warning when a file-specific deny[] entry is skipped", () => {
+    // Use /etc/passwd (always a file) rather than /etc/hosts which is already in
+    // _bwrapFileDenyWarnedPaths from the generateBwrapArgs test above.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      _warnBwrapFileDenyOnce("/etc/passwd");
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("/etc/passwd"));
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("parent directory"));
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it("still emits --tmpfs for deny[] entry that resolves to a directory", () => {

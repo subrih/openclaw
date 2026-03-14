@@ -865,6 +865,19 @@ describe("applyScriptPolicyOverride", () => {
     }
   });
 
+  it("matches scripts key written with ~ even though resolvedArgv0 is absolute", () => {
+    // Regression: "~/bin/deploy.sh" in scripts{} must match resolvedArgv0 "/home/user/bin/deploy.sh".
+    // A direct object lookup misses tilde keys; ~ must be expanded before comparing.
+    const absPath = path.join(os.homedir(), "bin", "deploy.sh");
+    const base: AccessPolicyConfig = {
+      default: "rwx",
+      scripts: { "~/bin/deploy.sh": { rules: { "/secret/**": "---" } } },
+    };
+    const { overrideRules, hashMismatch } = applyScriptPolicyOverride(base, absPath);
+    expect(hashMismatch).toBeUndefined();
+    expect(overrideRules?.["/secret/**"]).toBe("---");
+  });
+
   it("applies override when sha256 matches — rules in overrideRules, not policy", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ap-test-"));
     const scriptPath = path.join(tmpDir, "script.sh");
