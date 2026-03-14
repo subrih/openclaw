@@ -33,6 +33,10 @@ let bwrapAvailableCache: boolean | undefined;
 // the file directly inside the sandbox are not blocked at the syscall level.
 // See docs/tools/access-policy.md — "File-specific deny[] entries on Linux".
 const _bwrapFileDenyWarnedPaths = new Set<string>();
+/** Reset the one-time file-deny warning set. Only for use in tests. */
+export function _resetBwrapFileDenyWarnedPathsForTest(): void {
+  _bwrapFileDenyWarnedPaths.clear();
+}
 export function _warnBwrapFileDenyOnce(filePath: string): void {
   if (_bwrapFileDenyWarnedPaths.has(filePath)) {
     return;

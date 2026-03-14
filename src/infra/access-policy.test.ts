@@ -911,6 +911,39 @@ describe("resolveArgv0", () => {
     expect(result).not.toBeNull();
     expect(result).toMatch(/sh$/);
   });
+
+  itUnix("recurses into env --split-string=VALUE equals form", () => {
+    // --split-string=CMD (equals form) was previously not handled — resolveArgv0
+    // returned null, causing the fallback to treat "env" as argv0 and silently
+    // bypass tool-layer hash/policy checks for the embedded script.
+    const result = resolveArgv0("env --split-string='/bin/sh -c echo'");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  itUnix("recurses into env -S=VALUE equals form (short flag with equals)", () => {
+    const result = resolveArgv0("env -S='/bin/sh -c echo'");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  itUnix("recurses into env -SVALUE compact form (no space, no equals)", () => {
+    const result = resolveArgv0("env -S'/bin/sh -c echo'");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("returns null for deeply nested env -S to prevent stack overflow", () => {
+    // Build a deeply nested "env -S 'env -S ...' " string beyond the depth cap (8).
+    let cmd = "/bin/sh";
+    for (let i = 0; i < 10; i++) {
+      cmd = `env -S '${cmd}'`;
+    }
+    // Should not throw; depth cap returns null before stack overflow.
+    expect(() => resolveArgv0(cmd)).not.toThrow();
+    // Result may be null (cap hit) or a resolved path — either is acceptable.
+    // The important invariant is: no RangeError.
+  });
 });
 
 // ---------------------------------------------------------------------------

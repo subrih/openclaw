@@ -168,7 +168,9 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
               .split(/[/\\]/)
               .pop() ?? "";
           // Looks like a file when the last segment has a non-leading dot followed by a
-          // letter-containing extension — covers "secrets.key", "config.json", ".npmrc".
+          // letter-containing extension — covers "secrets.key", "config.json".
+          // Note: pure dotnames like ".npmrc", ".env", ".ssh" do NOT match this regex
+          // (they have no non-leading dot) and are therefore expanded to /** below.
           // Digit-only suffixes (v1.0, app-2.3) are treated as versioned directory names.
           // Bare dotnames without a secondary extension (.ssh, .aws, .env, .gnupg) are
           // NOT treated as file-like: they are expanded to /** so the subtree is protected
@@ -406,7 +408,12 @@ function findOnPath(name: string, pathOverride?: string): string | null {
  *
  * Returns null when the command is empty or the path cannot be determined.
  */
-export function resolveArgv0(command: string, cwd?: string): string | null {
+export function resolveArgv0(command: string, cwd?: string, _depth = 0): string | null {
+  // Guard against deeply nested env -S "env -S '...'" constructs that would
+  // otherwise overflow the call stack. 8 levels is far more than any real usage.
+  if (_depth > 8) {
+    return null;
+  }
   const trimmed = command.trim();
   if (!trimmed) {
     return null;
@@ -509,23 +516,36 @@ export function resolveArgv0(command: string, cwd?: string): string | null {
     // NAME=value pairs are handled naturally when we recurse into resolveArgv0.
     // --block-signal, --default-signal, --ignore-signal use [=SIG] syntax (never space-separated).
     const envOptWithArgRe = /^(-[uC]|--(unset|chdir))\s+/;
-    const envSplitStringRe = /^(-S|--(split-string))\s+/;
     while (afterEnv) {
       if (afterEnv === "--" || afterEnv.startsWith("-- ")) {
         afterEnv = afterEnv.slice(2).trimStart();
         break; // -- terminates env options; what follows is the command
       }
-      if (envSplitStringRe.test(afterEnv)) {
-        // -S/--split-string: the argument is itself a command string — recurse into it.
-        afterEnv = afterEnv.replace(/^\S+\s+/, ""); // strip "-S " or "--split-string "
+      // -S/--split-string: the argument is itself a command string — recurse into it.
+      // Handle all three forms GNU env accepts:
+      //   space:   -S CMD / --split-string CMD
+      //   equals:  -S=CMD / --split-string=CMD
+      //   compact: -SCMD  (short flag only, value starts immediately after -S)
+      const splitEqM = afterEnv.match(/^(?:-S|--(split-string))=([\s\S]*)/);
+      const splitSpM = afterEnv.match(/^(?:-S|--(split-string))\s+([\s\S]*)/);
+      const splitCmM = afterEnv.match(/^-S([^\s=][\s\S]*)/);
+      const splitArg = splitEqM
+        ? splitEqM[splitEqM.length - 1]
+        : splitSpM
+          ? splitSpM[splitSpM.length - 1]
+          : splitCmM
+            ? splitCmM[1]
+            : null;
+      if (splitArg !== null) {
+        let inner = splitArg.trim();
         // Strip surrounding quotes that the shell added around the embedded command.
         if (
-          (afterEnv.startsWith('"') && afterEnv.endsWith('"')) ||
-          (afterEnv.startsWith("'") && afterEnv.endsWith("'"))
+          (inner.startsWith('"') && inner.endsWith('"')) ||
+          (inner.startsWith("'") && inner.endsWith("'"))
         ) {
-          afterEnv = afterEnv.slice(1, -1);
+          inner = inner.slice(1, -1);
         }
-        return afterEnv ? resolveArgv0(afterEnv, cwd) : null;
+        return inner ? resolveArgv0(inner, cwd, _depth + 1) : null;
       }
       if (envOptWithArgRe.test(afterEnv)) {
         // Strip option + its argument; handle quoted values with spaces.
@@ -536,7 +556,7 @@ export function resolveArgv0(command: string, cwd?: string): string | null {
         break; // first non-option token — may still be NAME=value, handled by recursion
       }
     }
-    return afterEnv ? resolveArgv0(afterEnv, cwd) : null;
+    return afterEnv ? resolveArgv0(afterEnv, cwd, _depth + 1) : null;
   }
 
   return token;

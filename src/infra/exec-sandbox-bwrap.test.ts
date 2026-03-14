@@ -2,6 +2,7 @@ import os from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import type { AccessPolicyConfig } from "../config/types.tools.js";
 import {
+  _resetBwrapFileDenyWarnedPathsForTest,
   _warnBwrapFileDenyOnce,
   generateBwrapArgs,
   wrapCommandWithBwrap,
@@ -409,5 +410,22 @@ describe("wrapCommandWithBwrap", () => {
     const result = wrapCommandWithBwrap("cat /etc/hosts", { default: "r--" }, HOME);
     expect(result).toContain("/bin/sh -c");
     expect(result).toContain("cat /etc/hosts");
+  });
+});
+
+describe("_resetBwrapFileDenyWarnedPathsForTest", () => {
+  it("clears the warned-paths set so the same path can warn again", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // First warning — set is empty, should fire.
+    _warnBwrapFileDenyOnce("/tmp/secret.txt");
+    expect(spy).toHaveBeenCalledTimes(1);
+    // Second call with same path — already warned, should NOT fire again.
+    _warnBwrapFileDenyOnce("/tmp/secret.txt");
+    expect(spy).toHaveBeenCalledTimes(1);
+    // After reset the warning should fire again.
+    _resetBwrapFileDenyWarnedPathsForTest();
+    _warnBwrapFileDenyOnce("/tmp/secret.txt");
+    expect(spy).toHaveBeenCalledTimes(2);
+    spy.mockRestore();
   });
 });
