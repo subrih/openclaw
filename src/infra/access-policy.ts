@@ -133,11 +133,13 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
               .replace(/[/\\]$/, "")
               .split(/[/\\]/)
               .pop() ?? "";
-          // Has a dot that is not the leading dot (dotfile), and the extension
-          // contains at least one letter — this excludes version-like suffixes
-          // (.0, .3, -1.0, app-2.3) which look like versioned directory names.
-          // Examples: "secrets.key" → file; "v1.0" → directory; ".ssh" → directory.
-          looksLikeFile = /[^.]\.[a-zA-Z][^/\\]*$/.test(lastName);
+          // Looks like a file when either:
+          //   a) Pure dotfile name: leading dot, no further dot/slash — covers ".env",
+          //      ".netrc", ".htpasswd". These are typically files, not directories.
+          //   b) Non-leading dot with a letter-containing extension — covers "secrets.key",
+          //      "config.json". Digit-only extensions (v1.0, app-2.3) are treated as
+          //      versioned directory names and excluded.
+          looksLikeFile = /^\.[^./\\]+$/.test(lastName) || /[^.]\.[a-zA-Z][^/\\]*$/.test(lastName);
         }
         if (!isExistingFile && !looksLikeFile) {
           const fixed = `${pattern}/**`;
@@ -334,16 +336,25 @@ export function checkAccessPolicy(
  */
 function findOnPath(name: string, pathOverride?: string): string | null {
   const pathEnv = pathOverride ?? process.env.PATH ?? "";
+  // On Windows, bare names like "node" resolve to "node.exe" or "node.cmd" via
+  // PATHEXT. Without probing extensions, accessSync finds nothing and we fall back
+  // to the cwd-relative path, causing checkAccessPolicy to evaluate the wrong path.
+  const extensions =
+    process.platform === "win32"
+      ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(path.delimiter)
+      : [""];
   for (const dir of pathEnv.split(path.delimiter)) {
     if (!dir) {
       continue;
     }
-    const candidate = path.join(dir, name);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      // not in this dir
+    for (const ext of extensions) {
+      const candidate = path.join(dir, name + ext);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {
+        // not in this dir/ext combo
+      }
     }
   }
   return null;
@@ -454,19 +465,34 @@ export function resolveArgv0(command: string, cwd?: string): string | null {
     let afterEnv = commandRest.replace(/^\S+\s*/, "");
     // Skip env options and their arguments so `env -i /script.sh` resolves to
     // /script.sh rather than treating `-i` as argv0. Short options that consume
-    // the next token as their argument (-u VAR, -C DIR, -S STR) are handled
-    // explicitly; all other flags (e.g. -i, --ignore-environment) are single tokens.
+    // the next token as their argument (-u VAR, -C DIR) are stripped including
+    // any quoted value (e.g. -C "/path with space"). -S/--split-string is special:
+    // its value IS a command string, so we recurse into it rather than discard it.
+    // All other flags (e.g. -i, --ignore-environment) are single standalone tokens.
     // NAME=value pairs are handled naturally when we recurse into resolveArgv0.
-    // Short options that consume the next token as a separate argument.
     // --block-signal, --default-signal, --ignore-signal use [=SIG] syntax (never space-separated).
-    const envOptWithArgRe = /^(-[uCS]|--(unset|chdir|split-string))\s+/;
+    const envOptWithArgRe = /^(-[uC]|--(unset|chdir))\s+/;
+    const envSplitStringRe = /^(-S|--(split-string))\s+/;
     while (afterEnv) {
       if (afterEnv === "--" || afterEnv.startsWith("-- ")) {
         afterEnv = afterEnv.slice(2).trimStart();
         break; // -- terminates env options; what follows is the command
       }
+      if (envSplitStringRe.test(afterEnv)) {
+        // -S/--split-string: the argument is itself a command string — recurse into it.
+        afterEnv = afterEnv.replace(/^\S+\s+/, ""); // strip "-S " or "--split-string "
+        // Strip surrounding quotes that the shell added around the embedded command.
+        if (
+          (afterEnv.startsWith('"') && afterEnv.endsWith('"')) ||
+          (afterEnv.startsWith("'") && afterEnv.endsWith("'"))
+        ) {
+          afterEnv = afterEnv.slice(1, -1);
+        }
+        return afterEnv ? resolveArgv0(afterEnv, cwd) : null;
+      }
       if (envOptWithArgRe.test(afterEnv)) {
-        afterEnv = afterEnv.replace(/^\S+\s+\S+\s*/, ""); // strip option + its arg
+        // Strip option + its argument; handle quoted values with spaces.
+        afterEnv = afterEnv.replace(/^\S+\s+(?:"[^"]*"|'[^']*'|\S+)\s*/, "");
       } else if (afterEnv[0] === "-") {
         afterEnv = afterEnv.replace(/^\S+\s*/, ""); // strip standalone flag
       } else {

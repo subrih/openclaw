@@ -188,9 +188,14 @@ describe("loadAccessPolicyFile", () => {
     };
     writeFile(content);
     const result = loadAccessPolicyFile();
-    expect(result?.version).toBe(1);
-    expect(result?.base?.default).toBe("r--");
-    expect(result?.agents?.subri?.rules?.["~/dev/**"]).toBe("rwx");
+    expect(result).not.toBe(BROKEN_POLICY_FILE);
+    expect(result).not.toBeNull();
+    if (result === null || result === BROKEN_POLICY_FILE) {
+      throw new Error("unexpected");
+    }
+    expect(result.version).toBe(1);
+    expect(result.base?.default).toBe("r--");
+    expect(result.agents?.subri?.rules?.["~/dev/**"]).toBe("rwx");
   });
 });
 

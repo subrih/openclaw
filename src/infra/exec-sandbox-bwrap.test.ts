@@ -9,7 +9,10 @@ import {
 
 const HOME = os.homedir();
 
-describe("generateBwrapArgs", () => {
+// bwrap is Linux-only — skip the generateBwrapArgs tests on other platforms so
+// Windows/macOS CI does not fail on fs.statSync calls against Unix-only paths
+// like /etc/hosts that don't exist there.
+describe.skipIf(process.platform !== "linux")("generateBwrapArgs", () => {
   it("starts with --ro-bind / / when default allows reads", () => {
     const config: AccessPolicyConfig = { default: "r--" };
     const args = generateBwrapArgs(config, HOME);

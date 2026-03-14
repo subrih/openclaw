@@ -126,6 +126,19 @@ describe("validateAccessPolicyConfig", () => {
     expect(config.deny?.[0]).toBe(fileLikePath); // must NOT be expanded to /**
   });
 
+  it("does NOT auto-expand dotfile-style non-existent deny[] paths (.env, .netrc)", () => {
+    // Leading-dot names like ".env" or ".netrc" are files, not directories. Expanding
+    // "~/.env" to "~/.env/**" would protect only non-existent children, leaving the
+    // file itself unprotected once created. The heuristic treats leading-dot names
+    // (no further dot/slash) as file-like and skips auto-expansion.
+    const base = os.tmpdir();
+    for (const name of [".env", ".netrc", ".htpasswd", ".npmrc"]) {
+      const config: AccessPolicyConfig = { deny: [path.join(base, name)] };
+      validateAccessPolicyConfig(config);
+      expect(config.deny?.[0]).toBe(path.join(base, name)); // must NOT be expanded to /**
+    }
+  });
+
   it("does NOT auto-expand a bare deny[] entry that is an existing file", () => {
     // A specific file like "~/.ssh/id_rsa" must stay as an exact-match pattern.
     // Expanding it to "~/.ssh/id_rsa/**" would only match non-existent children,
@@ -819,6 +832,34 @@ describe("resolveArgv0", () => {
   it("strips --default-signal and --ignore-signal as standalone flags", () => {
     expect(resolveArgv0("env --default-signal /bin/sh")).toMatch(/sh$/);
     expect(resolveArgv0("env --ignore-signal /bin/sh")).toMatch(/sh$/);
+  });
+
+  it("recurses into env -S split-string argument to find real argv0", () => {
+    // env -S "FOO=1 /bin/sh -c echo" — the argument to -S is itself a command string.
+    // Must recurse and return /bin/sh, not null or /usr/bin/env.
+    const result = resolveArgv0('env -S "FOO=1 /bin/sh -c echo"');
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("recurses into env --split-string long form", () => {
+    const result = resolveArgv0("env --split-string '/bin/sh -c echo'");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("looks through env -C with a quoted directory arg containing spaces", () => {
+    // env -C "/path with space" /bin/sh — the dir arg is quoted; must not leave a
+    // dangling fragment that gets treated as the command.
+    const result = resolveArgv0('env -C "/path with space" /bin/sh -c echo');
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("looks through env --chdir with a quoted directory arg", () => {
+    const result = resolveArgv0("env --chdir '/tmp/my dir' /bin/sh -c echo");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
   });
 });
 
