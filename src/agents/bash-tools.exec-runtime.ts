@@ -363,7 +363,12 @@ export async function runExecProcess(opts: {
     // Tool-layer exec path check — defense-in-depth for platforms where OS-level
     // enforcement (seatbelt/bwrap) is unavailable (Linux without bwrap, Windows).
     // Mirrors the checkAccessPolicy calls in read/write tools for consistency.
-    if (checkAccessPolicy(argv0, "exec", effectivePermissions) === "deny") {
+    //
+    // When a policy.scripts entry was found and sha256 passed, the hash check IS
+    // the exec-authorization signal — skip the base exec check so scripts don't
+    // also need a separate exec rule in the base policy to run.
+    const hasScriptOverride = argv0 in (opts.permissions.scripts ?? {});
+    if (!hasScriptOverride && checkAccessPolicy(argv0, "exec", effectivePermissions) === "deny") {
       throw new Error(`exec denied by access policy: ${argv0}`);
     }
     if (process.platform === "darwin") {

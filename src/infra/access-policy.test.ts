@@ -95,6 +95,16 @@ describe("validateAccessPolicyConfig", () => {
     expect(config.deny?.[0]).toBe(`${dir}/**`);
   });
 
+  it("auto-expands bare deny[] entry even when the directory does not yet exist", () => {
+    // Greptile: deny[] must expand unconditionally — stat-gated expansion leaves
+    // non-existent paths unexpanded, silently allowing files created there later.
+    const nonExistent = path.join(os.tmpdir(), "openclaw-test-nonexistent-" + Date.now());
+    const config: AccessPolicyConfig = { deny: [nonExistent] };
+    const errs = validateAccessPolicyConfig(config);
+    expect(config.deny?.[0]).toBe(`${nonExistent}/**`);
+    expect(errs[0]).toMatch(/auto-expanded/);
+  });
+
   it("accepts valid 'rwx' and '---' perm strings", () => {
     expect(validateAccessPolicyConfig({ default: "rwx" })).toEqual([]);
     expect(validateAccessPolicyConfig({ default: "---" })).toEqual([]);

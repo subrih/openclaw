@@ -82,25 +82,21 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
         errors.push(`access-policy.deny[${i}] must be a non-empty glob pattern`);
         continue;
       }
-      // Same bare-directory auto-expand as rules: "~/.ssh" → "~/.ssh/**" so the
-      // entire directory is denied, not just the directory entry itself.
+      // Unconditional bare-path auto-expand: "~/.ssh" → "~/.ssh/**" so the
+      // entire directory tree is denied, not just the directory inode itself.
+      // Unlike rules (where an allow for a non-existent path is harmless), deny[]
+      // entries are proactive security controls — a user writing deny:["~/.creds"]
+      // intends to block that subtree even before the directory is created. Relying
+      // on statSync would silently leave the bare pattern unexpanded if the directory
+      // doesn't exist yet, creating a gap when it is later created.
       if (!pattern.endsWith("/") && !/[*?[]/.test(pattern)) {
-        const expanded = pattern.startsWith("~")
-          ? pattern.replace(/^~(?=$|\/)/, os.homedir())
-          : pattern;
-        try {
-          if (fs.statSync(expanded).isDirectory()) {
-            const fixed = `${pattern}/**`;
-            config.deny[i] = fixed;
-            if (!_autoExpandedWarned.has(`deny:${pattern}`)) {
-              _autoExpandedWarned.add(`deny:${pattern}`);
-              errors.push(
-                `access-policy.deny["${pattern}"] is a directory — entry auto-expanded to "${fixed}" so it covers all contents.`,
-              );
-            }
-          }
-        } catch {
-          // Path inaccessible or missing — no action needed.
+        const fixed = `${pattern}/**`;
+        config.deny[i] = fixed;
+        if (!_autoExpandedWarned.has(`deny:${pattern}`)) {
+          _autoExpandedWarned.add(`deny:${pattern}`);
+          errors.push(
+            `access-policy.deny["${pattern}"] auto-expanded to "${fixed}" so it covers all directory contents.`,
+          );
         }
       }
     }

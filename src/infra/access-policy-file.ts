@@ -110,10 +110,20 @@ function validateAccessPolicyFileStructure(filePath: string, parsed: unknown): s
 }
 
 /**
- * Read and parse the sidecar file. Returns null if the file does not exist.
- * Logs a clear error (and returns null) if the file is present but broken.
+ * Sentinel returned by loadAccessPolicyFile when the file exists but is broken.
+ * Callers must treat this as a deny-all policy (default:"---") rather than
+ * disabling enforcement — a corrupted file should fail-closed, not fail-open.
  */
-export function loadAccessPolicyFile(): AccessPolicyFile | null {
+export const BROKEN_POLICY_FILE = Symbol("broken-policy-file");
+
+/**
+ * Read and parse the sidecar file.
+ * - Returns null if the file does not exist (opt-in not configured).
+ * - Returns BROKEN_POLICY_FILE if the file exists but is malformed/unreadable
+ *   (callers must treat this as default:"---" — fail-closed).
+ * - Returns the parsed file on success.
+ */
+export function loadAccessPolicyFile(): AccessPolicyFile | null | typeof BROKEN_POLICY_FILE {
   const filePath = resolveAccessPolicyPath();
   if (!fs.existsSync(filePath)) {
     return null;
@@ -127,14 +137,14 @@ export function loadAccessPolicyFile(): AccessPolicyFile | null {
     console.error(
       `[access-policy] Cannot parse ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
     );
-    console.error(`[access-policy] Permissions enforcement is DISABLED until the file is fixed.`);
-    return null;
+    console.error(`[access-policy] Failing closed (default: "---") until the file is fixed.`);
+    return BROKEN_POLICY_FILE;
   }
 
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     console.error(`[access-policy] ${filePath}: must be a JSON object at the top level.`);
-    console.error(`[access-policy] Permissions enforcement is DISABLED until the file is fixed.`);
-    return null;
+    console.error(`[access-policy] Failing closed (default: "---") until the file is fixed.`);
+    return BROKEN_POLICY_FILE;
   }
 
   const p = parsed as Record<string, unknown>;
@@ -142,8 +152,8 @@ export function loadAccessPolicyFile(): AccessPolicyFile | null {
     console.error(
       `[access-policy] ${filePath}: unsupported version ${JSON.stringify(p["version"])} (expected 1).`,
     );
-    console.error(`[access-policy] Permissions enforcement is DISABLED until the file is fixed.`);
-    return null;
+    console.error(`[access-policy] Failing closed (default: "---") until the file is fixed.`);
+    return BROKEN_POLICY_FILE;
   }
 
   // Structural validation — catches wrong nesting, misplaced keys, etc.
@@ -152,8 +162,8 @@ export function loadAccessPolicyFile(): AccessPolicyFile | null {
     for (const err of structErrors) {
       console.error(`[access-policy] ${err}`);
     }
-    console.error(`[access-policy] Permissions enforcement is DISABLED until the file is fixed.`);
-    return null;
+    console.error(`[access-policy] Failing closed (default: "---") until the file is fixed.`);
+    return BROKEN_POLICY_FILE;
   }
 
   return parsed as AccessPolicyFile;
@@ -179,8 +189,15 @@ export function _resetNotFoundWarnedForTest(): void {
  * Logs errors on invalid perm strings but does not throw — bad strings fall back to
  * deny-all for that entry (handled downstream by checkAccessPolicy's permAllows logic).
  */
+/** Deny-all policy returned when the policy file is present but broken (fail-closed). */
+const DENY_ALL_POLICY: AccessPolicyConfig = { default: "---" };
+
 export function resolveAccessPolicyForAgent(agentId?: string): AccessPolicyConfig | undefined {
   const file = loadAccessPolicyFile();
+  if (file === BROKEN_POLICY_FILE) {
+    // File exists but is malformed — fail-closed: deny everything until fixed.
+    return DENY_ALL_POLICY;
+  }
   if (!file) {
     // access-policy.json is entirely opt-in — silently return undefined when the
     // file is absent so users who have not configured the feature see no noise.

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  BROKEN_POLICY_FILE,
   _resetNotFoundWarnedForTest,
   loadAccessPolicyFile,
   mergeAccessPolicy,
@@ -112,69 +113,69 @@ describe("loadAccessPolicyFile", () => {
     expect(loadAccessPolicyFile()).toBeNull();
   });
 
-  it("returns null and logs error when file is invalid JSON", () => {
+  it("returns BROKEN_POLICY_FILE and logs error when file is invalid JSON", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const p = resolveAccessPolicyPath();
     fs.writeFileSync(p, "not json {{ broken");
     const result = loadAccessPolicyFile();
-    expect(result).toBeNull();
+    expect(result).toBe(BROKEN_POLICY_FILE);
     expect(spy).toHaveBeenCalledWith(expect.stringContaining("Cannot parse"));
-    expect(spy).toHaveBeenCalledWith(expect.stringContaining("DISABLED"));
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("Failing closed"));
     spy.mockRestore();
   });
 
-  it("returns null and logs error when version is not 1", () => {
+  it("returns BROKEN_POLICY_FILE and logs error when version is not 1", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     writeFile({ version: 2, base: {} });
     const result = loadAccessPolicyFile();
-    expect(result).toBeNull();
+    expect(result).toBe(BROKEN_POLICY_FILE);
     expect(spy).toHaveBeenCalledWith(expect.stringContaining("unsupported version"));
-    expect(spy).toHaveBeenCalledWith(expect.stringContaining("DISABLED"));
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("Failing closed"));
     spy.mockRestore();
   });
 
-  it("returns null and logs error when base is not an object", () => {
+  it("returns BROKEN_POLICY_FILE and logs error when base is not an object", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     writeFile({ version: 1, base: ["r--"] });
     const result = loadAccessPolicyFile();
-    expect(result).toBeNull();
+    expect(result).toBe(BROKEN_POLICY_FILE);
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('"base" must be an object'));
     spy.mockRestore();
   });
 
-  it("returns null and logs error when agents is not an object", () => {
+  it("returns BROKEN_POLICY_FILE and logs error when agents is not an object", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     writeFile({ version: 1, agents: "bad" });
     const result = loadAccessPolicyFile();
-    expect(result).toBeNull();
+    expect(result).toBe(BROKEN_POLICY_FILE);
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('"agents" must be an object'));
     spy.mockRestore();
   });
 
-  it("returns null and logs error when a top-level key like 'rules' is misplaced", () => {
+  it("returns BROKEN_POLICY_FILE and logs error when a top-level key like 'rules' is misplaced", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     // Common mistake: rules at top level instead of under base
     writeFile({ version: 1, rules: { "/**": "r--" } });
     const result = loadAccessPolicyFile();
-    expect(result).toBeNull();
+    expect(result).toBe(BROKEN_POLICY_FILE);
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('unexpected top-level key "rules"'));
     spy.mockRestore();
   });
 
-  it("returns null and logs error when 'deny' is misplaced at top level", () => {
+  it("returns BROKEN_POLICY_FILE and logs error when 'deny' is misplaced at top level", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     writeFile({ version: 1, deny: ["~/.ssh/**"] });
     const result = loadAccessPolicyFile();
-    expect(result).toBeNull();
+    expect(result).toBe(BROKEN_POLICY_FILE);
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('unexpected top-level key "deny"'));
     spy.mockRestore();
   });
 
-  it("returns null and logs error when an agent block is not an object", () => {
+  it("returns BROKEN_POLICY_FILE and logs error when an agent block is not an object", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     writeFile({ version: 1, agents: { subri: "rwx" } });
     const result = loadAccessPolicyFile();
-    expect(result).toBeNull();
+    expect(result).toBe(BROKEN_POLICY_FILE);
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('agents["subri"] must be an object'));
     spy.mockRestore();
   });
@@ -220,13 +221,15 @@ describe("resolveAccessPolicyForAgent", () => {
     warnSpy.mockRestore();
   });
 
-  it("does not warn when config file exists but is broken (error already logged)", () => {
+  it("returns deny-all and logs error when config file is broken (fail-closed)", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     writeFile({ version: 1, rules: { "/**": "r--" } }); // misplaced key — triggers error
-    resolveAccessPolicyForAgent("subri");
+    const result = resolveAccessPolicyForAgent("subri");
     expect(warnSpy).not.toHaveBeenCalled();
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("DISABLED"));
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Failing closed"));
+    // Broken file must fail-closed: deny-all policy, not undefined
+    expect(result).toEqual({ default: "---" });
     warnSpy.mockRestore();
     errSpy.mockRestore();
   });
