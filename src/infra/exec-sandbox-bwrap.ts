@@ -215,16 +215,22 @@ export function generateBwrapArgs(
       // a restrictive base will also permit reads at the OS layer. The tool layer still
       // denies read tool calls per the rule, so the practical exposure is exec-only paths.
       args.push("--bind-try", p, p);
-    } else if (catchAllPerm[0] !== "r" && perm[0] === "r") {
+    } else if (VALID_PERM_RE.test(perm) && catchAllPerm[0] !== "r" && perm[0] === "r") {
       // Restrictive base: only bind paths that the rule explicitly allows reads on.
       // Do NOT emit --ro-bind-try for "---" or "--x" rules — the base already denies
       // by not mounting; emitting a mount here would grant read access.
+      // VALID_PERM_RE guard: malformed perm falls through to no-op (fail closed).
       args.push("--ro-bind-try", p, p);
-    } else if (catchAllPerm[0] === "r" && perm[0] !== "r") {
-      // Permissive base + narrowing rule (no read bit): overlay with tmpfs so the
-      // path is hidden even though --ro-bind / / made it readable by default.
-      // This mirrors what deny[] does — without this, "---" rules under a permissive
-      // default are silently ignored at the bwrap layer.
+    } else if (VALID_PERM_RE.test(perm) && perm[0] !== "r") {
+      // Deny/exec-only rule: overlay with --tmpfs to hide the path.
+      // Two cases handled identically:
+      //   Permissive base (catchAllPerm[0] === "r"): --ro-bind / / made path readable;
+      //     --tmpfs hides it.
+      //   Restrictive base (catchAllPerm[0] !== "r"): SYSTEM_RO_BIND_PATHS unconditionally
+      //     mounts /etc, /usr, /bin, /lib, /lib64, /sbin, /opt; a "---" rule on those paths
+      //     had no effect without this branch because the three prior branches all require
+      //     perm[0] === "r". For non-system paths in restrictive mode, --tmpfs is a no-op
+      //     (nothing mounted there to overlay), so emitting it is harmless.
       // Guard: bwrap --tmpfs only accepts a directory as the mount point. If the
       // resolved path is a file, skip the mount and warn — same behaviour as deny[].
       // Non-existent paths are assumed to be directories (forward-protection).
@@ -241,6 +247,7 @@ export function generateBwrapArgs(
       }
     }
     // Permissive base + read-only rule: already covered by --ro-bind / /; no extra mount.
+    // Restrictive base + read-only rule: emitted as --ro-bind-try above.
   }
 
   // Script-specific override mounts — emitted after base rules so they can reopen
@@ -261,7 +268,8 @@ export function generateBwrapArgs(
         // and writes succeed. bwrap mounts are ordered; this override comes after
         // deny[] tmpfs entries, so --bind-try wins regardless of the base policy.
         args.push("--bind-try", p, p);
-      } else if (perm[0] === "r") {
+      } else if (VALID_PERM_RE.test(perm) && perm[0] === "r") {
+        // VALID_PERM_RE guard: malformed perm falls through to the deny branch below.
         args.push("--ro-bind-try", p, p);
       } else {
         // Mirror the base-rules isDir guard — bwrap --tmpfs only accepts directories.

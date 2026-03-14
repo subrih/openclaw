@@ -193,6 +193,24 @@ describe.skipIf(process.platform !== "linux")("generateBwrapArgs", () => {
     expect(tmpfsMounts).toContain(`${HOME}/scripts`);
   });
 
+  it('"---" rule on SYSTEM_RO_BIND_PATHS path emits --tmpfs in restrictive mode', () => {
+    // SYSTEM_RO_BIND_PATHS (/etc, /usr, /bin, /lib, /lib64, /sbin, /opt) are unconditionally
+    // --ro-bind-try mounted in restrictive mode. Without a --tmpfs overlay, a "---" rule on
+    // e.g. "/etc/**" has no OS-level effect — syscalls inside the sandbox can still read
+    // /etc/passwd, /etc/shadow, etc. The fix: treat deny rules the same in both modes.
+    const config: AccessPolicyConfig = {
+      policy: { "/etc/**": "---" },
+    };
+    const args = generateBwrapArgs(config, HOME);
+    const tmpfsMounts = args.map((a, i) => (a === "--tmpfs" ? args[i + 1] : null)).filter(Boolean);
+    expect(tmpfsMounts).toContain("/etc");
+    // Must NOT emit a read mount for a deny rule.
+    const roBound = args
+      .map((a, i) => (a === "--ro-bind-try" ? args[i + 1] : null))
+      .filter(Boolean);
+    expect(roBound).not.toContain("/etc");
+  });
+
   it('"---" rules do not create --ro-bind-try mounts in restrictive mode', () => {
     // A rule with "---" permission should NOT produce any bwrap mount — the
     // restrictive base already denies by not mounting. Emitting --ro-bind-try
@@ -409,6 +427,41 @@ describe.skipIf(process.platform !== "linux")("generateBwrapArgs", () => {
       args.map((a, i) => (args[i - 1] === "--bind-try" ? a : null)).filter(Boolean);
     expect(bindOf(withSlash)).toContain("/tmp");
     expect(bindOf(withSlash)).toEqual(bindOf(withGlob));
+  });
+
+  it("malformed perm string in base rules emits no mount (fail closed, not --ro-bind-try)", () => {
+    // A malformed perm like "rwxoops" must not produce a --ro-bind-try mount.
+    // Previously the else-if branch accessed perm[0] without VALID_PERM_RE guard,
+    // which could emit --ro-bind-try for a rule meant to be restrictive.
+    const config: AccessPolicyConfig = {
+      policy: {
+        [`${HOME}/workspace/**`]:
+          "rwxoops" as unknown as import("../config/types.tools.js").PermStr,
+      },
+    };
+    const args = generateBwrapArgs(config, HOME);
+    const roBound = args
+      .map((a, i) => (a === "--ro-bind-try" ? args[i + 1] : null))
+      .filter(Boolean);
+    const rwBound = args.map((a, i) => (a === "--bind-try" ? args[i + 1] : null)).filter(Boolean);
+    // Malformed perm must not produce any mount for this path.
+    expect(roBound).not.toContain(`${HOME}/workspace`);
+    expect(rwBound).not.toContain(`${HOME}/workspace`);
+  });
+
+  it("malformed perm string in script override emits no --ro-bind-try (fail closed)", () => {
+    // Same VALID_PERM_RE guard required in the scriptOverrideRules loop.
+    const config: AccessPolicyConfig = { policy: { "/**": "r--" } };
+    const overrides = {
+      [`${HOME}/data/**`]: "rwxoops" as unknown as import("../config/types.tools.js").PermStr,
+    };
+    const args = generateBwrapArgs(config, HOME, overrides);
+    const roBound = args
+      .map((a, i) => (a === "--ro-bind-try" ? args[i + 1] : null))
+      .filter(Boolean);
+    const rwBound = args.map((a, i) => (a === "--bind-try" ? args[i + 1] : null)).filter(Boolean);
+    expect(roBound).not.toContain(`${HOME}/data`);
+    expect(rwBound).not.toContain(`${HOME}/data`);
   });
 });
 

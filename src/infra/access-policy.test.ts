@@ -125,6 +125,23 @@ describe("validateAccessPolicyConfig", () => {
     ).toBe(true);
   });
 
+  it('emits "---"-specific mid-path wildcard diagnostic for scripts["policy"] deny rules', () => {
+    // "---" with a mid-path wildcard cannot be enforced at the OS layer —
+    // the diagnostic must say "OS-level enforcement cannot apply", not the generic prefix-match message.
+    const config: AccessPolicyConfig = {
+      scripts: {
+        policy: { "/home/*/secrets/**": "---" },
+      },
+    };
+    const errs = validateAccessPolicyConfig(config);
+    expect(
+      errs.some(
+        (e) =>
+          e.includes("OS-level") && e.includes("cannot apply") && e.includes('scripts["policy"]'),
+      ),
+    ).toBe(true);
+  });
+
   it("emits mid-path wildcard diagnostic for per-script policy entries", () => {
     const config: AccessPolicyConfig = {
       scripts: {
@@ -135,6 +152,21 @@ describe("validateAccessPolicyConfig", () => {
     expect(errs.some((e) => e.includes("mid-path wildcard") && e.includes("/deploy.sh"))).toBe(
       true,
     );
+  });
+
+  it('emits "---"-specific mid-path wildcard diagnostic for per-script deny rules', () => {
+    // Same as scripts["policy"] — per-script "---" mid-path must get the stronger warning.
+    const config: AccessPolicyConfig = {
+      scripts: {
+        "/deploy.sh": { policy: { "/home/*/secrets/**": "---" } },
+      },
+    };
+    const errs = validateAccessPolicyConfig(config);
+    expect(
+      errs.some(
+        (e) => e.includes("OS-level") && e.includes("cannot apply") && e.includes("/deploy.sh"),
+      ),
+    ).toBe(true);
   });
 
   it("validates scripts[].policy perm strings and emits diagnostics for bad ones", () => {
@@ -1119,6 +1151,28 @@ describe("applyScriptPolicyOverride", () => {
       expect(overrideRules?.["/tmp/**"]).toBe("rwx");
       expect(policy.policy?.["/tmp/**"]).toBeUndefined();
       expect(policy.scripts).toBeUndefined();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("uppercase sha256 in config matches (case-normalized at comparison)", () => {
+    // Validation regex uses /i so uppercase passes; crypto.digest("hex") returns lowercase.
+    // Without .toLowerCase() at comparison, uppercase sha256 always fails at runtime — silent
+    // misconfiguration that denies exec with no useful error.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ap-test-"));
+    const scriptPath = path.join(tmpDir, "script.sh");
+    const content = "#!/bin/sh\necho hi\n";
+    fs.writeFileSync(scriptPath, content);
+    const hashLower = crypto.createHash("sha256").update(Buffer.from(content)).digest("hex");
+    const hashUpper = hashLower.toUpperCase();
+    const realScriptPath = fs.realpathSync(scriptPath);
+    try {
+      const base: AccessPolicyConfig = {
+        scripts: { [scriptPath]: { sha256: hashUpper, policy: { "/tmp/**": "rwx" } } },
+      };
+      const { hashMismatch } = applyScriptPolicyOverride(base, realScriptPath);
+      expect(hashMismatch).toBeUndefined();
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }

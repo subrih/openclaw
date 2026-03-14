@@ -137,9 +137,15 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
           !_midPathWildcardWarned.has(`scripts:policy:${pattern}`)
         ) {
           _midPathWildcardWarned.add(`scripts:policy:${pattern}`);
-          errors.push(
-            `access-policy.scripts["policy"]["${pattern}"] contains a mid-path wildcard — OS-level enforcement uses prefix match (file-type filter is tool-layer only).`,
-          );
+          if (perm === "---") {
+            errors.push(
+              `access-policy.scripts["policy"]["${pattern}"] contains a mid-path wildcard with "---" — OS-level (bwrap/Seatbelt) enforcement cannot apply; tool-layer enforcement is still active.`,
+            );
+          } else {
+            errors.push(
+              `access-policy.scripts["policy"]["${pattern}"] contains a mid-path wildcard — OS-level enforcement uses prefix match (file-type filter is tool-layer only).`,
+            );
+          }
         }
         autoExpandBareDir(sharedPolicy, pattern, perm, errors);
       }
@@ -179,9 +185,15 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
             !_midPathWildcardWarned.has(`scripts:${scriptPath}:${pattern}`)
           ) {
             _midPathWildcardWarned.add(`scripts:${scriptPath}:${pattern}`);
-            errors.push(
-              `access-policy.scripts["${scriptPath}"].policy["${pattern}"] contains a mid-path wildcard — OS-level enforcement uses prefix match (file-type filter is tool-layer only).`,
-            );
+            if (perm === "---") {
+              errors.push(
+                `access-policy.scripts["${scriptPath}"].policy["${pattern}"] contains a mid-path wildcard with "---" — OS-level (bwrap/Seatbelt) enforcement cannot apply; tool-layer enforcement is still active.`,
+              );
+            } else {
+              errors.push(
+                `access-policy.scripts["${scriptPath}"].policy["${pattern}"] contains a mid-path wildcard — OS-level enforcement uses prefix match (file-type filter is tool-layer only).`,
+              );
+            }
           }
           autoExpandBareDir(scriptEntry.policy, pattern, perm, errors);
         }
@@ -648,7 +660,10 @@ export function applyScriptPolicyOverride(
     } catch {
       return { policy, hashMismatch: true };
     }
-    if (actualHash !== override.sha256) {
+    // Normalize to lowercase: crypto.digest("hex") always returns lowercase, but
+    // the validation regex accepts uppercase (/i). Without normalization an uppercase
+    // sha256 in config passes validation and then silently fails here at runtime.
+    if (actualHash !== override.sha256.toLowerCase()) {
       return { policy, hashMismatch: true };
     }
   }

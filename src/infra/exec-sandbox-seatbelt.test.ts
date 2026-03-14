@@ -226,6 +226,20 @@ describe("generateSeatbeltProfile", () => {
     expect(profile).not.toContain("**");
     expect(profile).toContain("/Users/kaveri/.ssh");
   });
+
+  it("bracket glob patterns are treated as wildcards, not SBPL literals", () => {
+    // Previously /[*?]/ missed [ — a pattern like "/usr/bin/[abc]" was emitted as
+    // sbplLiteral("/usr/bin/[abc]") which only matches a file literally named "[abc]".
+    // Fix: /[*?[]/ detects bracket globs and strips to the concrete prefix.
+    const config: AccessPolicyConfig = {
+      policy: { "/**": "rwx", "/usr/bin/[abc]": "---" as const },
+    };
+    const profile = generateSeatbeltProfile(config, HOME);
+    // Must NOT emit the literal bracket pattern.
+    expect(profile).not.toContain("[abc]");
+    // Must use the concrete prefix /usr/bin as an approximate subpath target.
+    expect(profile).toContain("/usr/bin");
+  });
 });
 
 describe("wrapCommandWithSeatbelt", () => {

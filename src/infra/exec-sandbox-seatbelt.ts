@@ -108,12 +108,15 @@ function patternToSbplMatcher(pattern: string, homeDir: string, perm?: PermStr):
   // Both * and ? are wildcard characters in glob syntax; strip from whichever
   // appears first so patterns like "/tmp/file?.txt" don't embed a literal ?
   // in the SBPL literal matcher.
-  const withoutWild = expanded.replace(/[/\\]?[*?].*$/, "");
+  // Strip from the first glob metacharacter (*, ?, or [) to get the longest concrete prefix.
+  const withoutWild = expanded.replace(/[/\\]?[*?[].*$/, "");
   const base = withoutWild || "/";
 
   // If the original pattern had wildcards, use subpath (recursive match).
-  // Otherwise use literal (exact match).
-  if (/[*?]/.test(expanded)) {
+  // Includes bracket globs ([abc]) — previously only * and ? were detected,
+  // causing [abc] to be emitted as an SBPL literal that only matches a file
+  // literally named "[abc]", not the intended character-class targets.
+  if (/[*?[]/.test(expanded)) {
     const wildcardIdx = expanded.search(/[*?[]/);
     const afterWildcard = expanded.slice(wildcardIdx + 1);
     if (/[/\\]/.test(afterWildcard)) {

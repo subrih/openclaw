@@ -65,6 +65,22 @@ describe("mergeAccessPolicy", () => {
     expect(mergeAccessPolicy(undefined, override)).toEqual(override);
   });
 
+  it("returns a copy when base is undefined — mutations do not corrupt the original", () => {
+    // mergeAccessPolicy(undefined, x) was returning x by reference. validateAccessPolicyConfig
+    // calls autoExpandBareDir which mutates .policy in-place, permanently corrupting the cached
+    // agents["*"] object for all subsequent calls in the same process.
+    const override = { policy: { "/tmp": "rwx" as const } };
+    const result = mergeAccessPolicy(undefined, override);
+    // Simulate autoExpandBareDir mutating the result.
+    if (result?.policy) {
+      result.policy["/tmp/**"] = "rwx";
+      delete result.policy["/tmp"];
+    }
+    // The original override must be unchanged.
+    expect(override.policy).toEqual({ "/tmp": "rwx" });
+    expect(override.policy["/tmp/**" as keyof typeof override.policy]).toBeUndefined();
+  });
+
   it("rules are shallow-merged, override key wins on collision", () => {
     const result = mergeAccessPolicy(
       { policy: { "/**": "r--", "~/**": "rw-" } },
@@ -198,6 +214,22 @@ describe("loadAccessPolicyFile", () => {
     const result = loadAccessPolicyFile();
     expect(result).toBe(BROKEN_POLICY_FILE);
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('agents["subri"] must be an object'));
+    spy.mockRestore();
+  });
+
+  it('returns BROKEN_POLICY_FILE when scripts["policy"] is a primitive (not an object)', () => {
+    // scripts["policy"] must be a Record<string, PermStr>; a primitive like `true`
+    // silently passes structural validation and is treated as an empty shared policy.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    writeFile({
+      version: 1,
+      agents: { "*": { scripts: { policy: true as unknown as Record<string, string> } } },
+    });
+    const result = loadAccessPolicyFile();
+    expect(result).toBe(BROKEN_POLICY_FILE);
+    expect(spy).toHaveBeenCalledWith(
+      expect.stringContaining('scripts["policy"] must be an object'),
+    );
     spy.mockRestore();
   });
 

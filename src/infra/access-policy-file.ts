@@ -42,7 +42,15 @@ export function mergeAccessPolicy(
     return undefined;
   }
   if (!base) {
-    return override;
+    // Return a shallow copy so that validateAccessPolicyConfig → autoExpandBareDir
+    // does not mutate the cached agents["*"] object in _fileCache. Without this,
+    // the first call permanently corrupts policy entries for all subsequent calls
+    // in the same process.
+    return {
+      ...override,
+      policy: override.policy ? { ...override.policy } : undefined,
+      scripts: override.scripts ? { ...override.scripts } : undefined,
+    };
   }
   if (!override) {
     return base;
@@ -140,8 +148,17 @@ function validateAccessPolicyFileStructure(filePath: string, parsed: unknown): s
             for (const [scriptKey, scriptEntry] of Object.entries(
               scripts as Record<string, unknown>,
             )) {
-              if (
-                scriptKey !== "policy" &&
+              if (scriptKey === "policy") {
+                // scripts["policy"] must be an object (Record<string, PermStr>), not a primitive.
+                if (
+                  scriptEntry != null &&
+                  (typeof scriptEntry !== "object" || Array.isArray(scriptEntry))
+                ) {
+                  errors.push(
+                    `${filePath}: agents["${agentId}"].scripts["policy"] must be an object (Record<string, PermStr>), got ${JSON.stringify(scriptEntry)}`,
+                  );
+                }
+              } else if (
                 scriptEntry != null &&
                 typeof scriptEntry === "object" &&
                 !Array.isArray(scriptEntry)
