@@ -118,6 +118,11 @@ export function generateBwrapArgs(
   if (defaultAllowsRead) {
     // Permissive base: everything is read-only by default.
     args.push("--ro-bind", "/", "/");
+    // --ro-bind / / is a recursive bind but does NOT propagate special kernel
+    // filesystems (procfs, devtmpfs) into the new mount namespace. Explicitly
+    // mount /proc so programs that read /proc/self/*, /proc/cpuinfo, etc. work
+    // correctly inside the sandbox (shells, Python, most build tools need this).
+    args.push("--proc", "/proc");
     // Upgrade /tmp to writable tmpfs and overlay a real /dev for normal process operation.
     args.push("--tmpfs", "/tmp");
     args.push("--dev", "/dev");

@@ -95,6 +95,15 @@ describe("generateBwrapArgs", () => {
     expect(() => generateBwrapArgs({}, HOME)).not.toThrow();
   });
 
+  it("adds --proc /proc in permissive mode so /proc is accessible inside the sandbox", () => {
+    // --ro-bind / / does not propagate kernel filesystems (procfs) into the new
+    // mount namespace; without --proc /proc, shells and Python fail in the sandbox.
+    const args = generateBwrapArgs({ default: "r--" }, HOME);
+    const procIdx = args.indexOf("--proc");
+    expect(procIdx).toBeGreaterThan(-1);
+    expect(args[procIdx + 1]).toBe("/proc");
+  });
+
   it("adds --tmpfs /tmp in permissive mode", () => {
     const config: AccessPolicyConfig = { default: "r--" };
     const args = generateBwrapArgs(config, HOME);

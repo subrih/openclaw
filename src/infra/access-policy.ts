@@ -82,21 +82,32 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
         errors.push(`access-policy.deny[${i}] must be a non-empty glob pattern`);
         continue;
       }
-      // Unconditional bare-path auto-expand: "~/.ssh" → "~/.ssh/**" so the
+      // Bare-path auto-expand for directories: "~/.ssh" → "~/.ssh/**" so the
       // entire directory tree is denied, not just the directory inode itself.
-      // Unlike rules (where an allow for a non-existent path is harmless), deny[]
-      // entries are proactive security controls — a user writing deny:["~/.creds"]
-      // intends to block that subtree even before the directory is created. Relying
-      // on statSync would silently leave the bare pattern unexpanded if the directory
-      // doesn't exist yet, creating a gap when it is later created.
+      // For paths that exist and are confirmed files (statSync), keep the bare
+      // pattern — expanding to "/**" would only match non-existent children,
+      // leaving the file itself unprotected at both the tool layer and bwrap.
+      // Non-existent paths are treated as future directories and always expanded
+      // so the subtree is protected before the directory is created.
       if (!pattern.endsWith("/") && !/[*?[]/.test(pattern)) {
-        const fixed = `${pattern}/**`;
-        config.deny[i] = fixed;
-        if (!_autoExpandedWarned.has(`deny:${pattern}`)) {
-          _autoExpandedWarned.add(`deny:${pattern}`);
-          errors.push(
-            `access-policy.deny["${pattern}"] auto-expanded to "${fixed}" so it covers all directory contents.`,
-          );
+        const expandedForStat = pattern.startsWith("~")
+          ? pattern.replace(/^~(?=$|[/\\])/, os.homedir())
+          : pattern;
+        let isExistingFile = false;
+        try {
+          isExistingFile = !fs.statSync(expandedForStat).isDirectory();
+        } catch {
+          // Path does not exist — treat as a future directory and expand to /**.
+        }
+        if (!isExistingFile) {
+          const fixed = `${pattern}/**`;
+          config.deny[i] = fixed;
+          if (!_autoExpandedWarned.has(`deny:${pattern}`)) {
+            _autoExpandedWarned.add(`deny:${pattern}`);
+            errors.push(
+              `access-policy.deny["${pattern}"] auto-expanded to "${fixed}" so it covers all directory contents.`,
+            );
+          }
         }
       }
     }
@@ -197,7 +208,13 @@ export function findBestRule(
   for (const [pattern, perm] of Object.entries(rules)) {
     // Normalize the expanded pattern so /private/tmp/** matches /tmp/** on macOS.
     const expanded = normalizePlatformPath(expandPattern(pattern, homeDir));
-    if (matchesExecAllowlistPattern(expanded, targetPath)) {
+    // Test both the bare path and path + "/" so that "dir/**"-style rules match
+    // the directory itself — mirrors the dual-probe in checkAccessPolicy so
+    // callers don't need to remember to append "/." when passing a directory.
+    if (
+      matchesExecAllowlistPattern(expanded, targetPath) ||
+      matchesExecAllowlistPattern(expanded, targetPath + "/")
+    ) {
       // Longer *expanded* pattern = more specific. Compare expanded lengths so
       // a tilde rule like "~/.ssh/**" (expanded: "/home/user/.ssh/**", 20 chars)
       // correctly beats a broader absolute rule like "/home/user/**" (14 chars).

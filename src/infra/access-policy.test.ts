@@ -96,13 +96,31 @@ describe("validateAccessPolicyConfig", () => {
   });
 
   it("auto-expands bare deny[] entry even when the directory does not yet exist", () => {
-    // Greptile: deny[] must expand unconditionally — stat-gated expansion leaves
-    // non-existent paths unexpanded, silently allowing files created there later.
+    // Non-existent paths are treated as future directories and expanded to /**.
     const nonExistent = path.join(os.tmpdir(), "openclaw-test-nonexistent-" + Date.now());
     const config: AccessPolicyConfig = { deny: [nonExistent] };
     const errs = validateAccessPolicyConfig(config);
     expect(config.deny?.[0]).toBe(`${nonExistent}/**`);
     expect(errs[0]).toMatch(/auto-expanded/);
+  });
+
+  it("does NOT auto-expand a bare deny[] entry that is an existing file", () => {
+    // A specific file like "~/.ssh/id_rsa" must stay as an exact-match pattern.
+    // Expanding it to "~/.ssh/id_rsa/**" would only match non-existent children,
+    // leaving the file itself unprotected at the tool layer and in bwrap.
+    // process.execPath is the running node/bun binary — always a real file.
+    const file = process.execPath;
+    const config: AccessPolicyConfig = { deny: [file] };
+    validateAccessPolicyConfig(config);
+    expect(config.deny?.[0]).toBe(file); // kept as bare path, not expanded
+  });
+
+  it("file-specific deny[] entry blocks access to the file via checkAccessPolicy", () => {
+    // Regression: bare file path in deny[] must block reads at the tool layer.
+    const file = process.execPath;
+    const config: AccessPolicyConfig = { default: "rwx", deny: [file] };
+    validateAccessPolicyConfig(config); // applies normalization in-place
+    expect(checkAccessPolicy(file, "read", config)).toBe("deny");
   });
 
   it("accepts valid 'rwx' and '---' perm strings", () => {
@@ -353,6 +371,13 @@ describe("findBestRule", () => {
   it("returns null when no pattern matches", () => {
     const rules = { "/foo/**": "rw-" };
     expect(findBestRule("/bar/baz", rules)).toBeNull();
+  });
+
+  it("bare directory path matches /** rule without requiring /. suffix", () => {
+    // findBestRule("/tmp", {"/tmp/**": "r--"}) must return "r--".
+    // Previously callers had to pass "/tmp/." to trigger a match — fragile contract.
+    const rules = { "/tmp/**": "r--" };
+    expect(findBestRule("/tmp", rules)).toBe("r--");
   });
 
   it("tilde rule beats broader absolute rule when expanded path is longer", () => {
