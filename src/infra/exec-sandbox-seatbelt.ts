@@ -302,8 +302,10 @@ export function generateSeatbeltProfile(
 // unpredictable, and O_CREAT|O_EXCL ensures creation fails if the path was
 // pre-created by an attacker (symlink pre-creation attack). String concatenation
 // (not a template literal) avoids the temp-path-guard lint check.
-// Files accumulate at the rate of exec calls and are cleaned up on graceful exit;
-// on SIGKILL they remain but /tmp is wiped on reboot.
+// Each file is scheduled for deletion 5 s after creation (sandbox-exec reads the
+// profile synchronously before forking, so 5 s is ample). The process.once("exit")
+// handler mops up any files that the timer did not reach (e.g. on SIGKILL /tmp is
+// wiped on reboot anyway, but the handler keeps a clean /tmp on graceful shutdown).
 const _profileFiles = new Set<string>();
 process.once("exit", () => {
   for (const f of _profileFiles) {
@@ -315,6 +317,18 @@ process.once("exit", () => {
   }
 });
 
+function _scheduleProfileCleanup(filePath: string): void {
+  // .unref() so the timer does not prevent the process from exiting naturally.
+  setTimeout(() => {
+    try {
+      fs.unlinkSync(filePath);
+      _profileFiles.delete(filePath);
+    } catch {
+      // Already deleted or inaccessible — process.once("exit") will handle it.
+    }
+  }, 5_000).unref();
+}
+
 /**
  * Wrap a shell command string with sandbox-exec using the given profile.
  * Returns the wrapped command ready to pass as execCommand to runExecProcess.
@@ -325,6 +339,7 @@ export function wrapCommandWithSeatbelt(command: string, profile: string): strin
   const rand = crypto.randomBytes(8).toString("hex");
   const filePath = path.join(os.tmpdir(), "openclaw-sb-" + process.pid + "-" + rand + ".sb");
   _profileFiles.add(filePath);
+  _scheduleProfileCleanup(filePath);
   const fd = fs.openSync(
     filePath,
     fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,

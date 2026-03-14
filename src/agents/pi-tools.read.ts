@@ -695,6 +695,11 @@ export function createOpenClawReadTool(
       assertRequiredParams(record, CLAUDE_PARAM_GROUPS.read, base.name);
       const filePath = typeof record?.path === "string" ? String(record.path) : "<unknown>";
       // Path-level permission check (when tools.fs.permissions is configured).
+      // Use the resolved path for the actual read — closes the TOCTOU window where a
+      // symlink swapped between check and open could redirect I/O to an unchecked path.
+      // This mirrors the write/edit tools which return the resolved path from
+      // assertWritePermitted/assertEditPermitted and use it for the subsequent I/O call.
+      let readArgs = (normalized ?? params ?? {}) as Record<string, unknown>;
       if (options?.permissions && filePath !== "<unknown>") {
         const resolvedPath = safeRealpath(
           path.isAbsolute(filePath)
@@ -704,11 +709,12 @@ export function createOpenClawReadTool(
         if (checkAccessPolicy(resolvedPath, "read", options.permissions) === "deny") {
           throw new Error(`Permission denied: read access to ${resolvedPath} is not allowed.`);
         }
+        readArgs = { ...readArgs, path: resolvedPath };
       }
       const result = await executeReadWithAdaptivePaging({
         base,
         toolCallId,
-        args: (normalized ?? params ?? {}) as Record<string, unknown>,
+        args: readArgs,
         signal,
         maxBytes: resolveAdaptiveReadMaxBytes(options),
       });

@@ -348,9 +348,13 @@ export async function runExecProcess(opts: {
   const sessionId = createSessionSlug();
   const baseCommand = opts.execCommand ?? opts.command;
 
-  // Apply OS-level path enforcement when access-policy permissions are configured.
+  // Apply access-policy enforcement when permissions are configured.
+  // Hash verification and tool-layer exec checks run unconditionally — container
+  // sandboxes (opts.sandbox) share the host filesystem via volume mounts so a
+  // tampered script is still reachable. Only OS-level wrapping (seatbelt/bwrap)
+  // is skipped when a container sandbox already provides filesystem isolation.
   let execCommand = baseCommand;
-  if (opts.permissions && !opts.sandbox) {
+  if (opts.permissions) {
     const argv0 = resolveArgv0(baseCommand, opts.workdir) ?? baseCommand;
     const {
       policy: effectivePermissions,
@@ -371,25 +375,28 @@ export async function runExecProcess(opts: {
     if (!hasScriptOverride && checkAccessPolicy(argv0, "exec", effectivePermissions) === "deny") {
       throw new Error(`exec denied by access policy: ${argv0}`);
     }
-    if (process.platform === "darwin") {
-      const profile = generateSeatbeltProfile(effectivePermissions, os.homedir(), overrideRules);
-      execCommand = wrapCommandWithSeatbelt(baseCommand, profile);
-    } else if (process.platform === "linux") {
-      if (await isBwrapAvailable()) {
-        // Pass overrideRules separately so they are emitted AFTER deny[] mounts,
-        // giving script-specific grants precedence over base deny entries — matching
-        // the Seatbelt path where scriptOverrideRules are emitted last in the profile.
-        execCommand = wrapCommandWithBwrap(
-          baseCommand,
-          effectivePermissions,
-          os.homedir(),
-          overrideRules,
-        );
-      } else {
-        _warnBwrapUnavailableOnce();
+    // OS-level sandbox wrapping — skip when a container sandbox already isolates the process.
+    if (!opts.sandbox) {
+      if (process.platform === "darwin") {
+        const profile = generateSeatbeltProfile(effectivePermissions, os.homedir(), overrideRules);
+        execCommand = wrapCommandWithSeatbelt(baseCommand, profile);
+      } else if (process.platform === "linux") {
+        if (await isBwrapAvailable()) {
+          // Pass overrideRules separately so they are emitted AFTER deny[] mounts,
+          // giving script-specific grants precedence over base deny entries — matching
+          // the Seatbelt path where scriptOverrideRules are emitted last in the profile.
+          execCommand = wrapCommandWithBwrap(
+            baseCommand,
+            effectivePermissions,
+            os.homedir(),
+            overrideRules,
+          );
+        } else {
+          _warnBwrapUnavailableOnce();
+        }
+      } else if (process.platform === "win32") {
+        _warnWindowsUnconfiguredOnce();
       }
-    } else if (process.platform === "win32") {
-      _warnWindowsUnconfiguredOnce();
     }
   }
 
