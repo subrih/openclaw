@@ -359,8 +359,7 @@ export async function runExecProcess(opts: {
     // checkAccessPolicy matches against a path-like token instead of a multi-word
     // string that never matches any absolute-path rule (and would pass unconditionally
     // under a permissive default).
-    const argv0 =
-      resolveArgv0(baseCommand, opts.workdir) ?? baseCommand.trim().split(/\s+/)[0] ?? baseCommand;
+    const argv0 = resolveArgv0(baseCommand, opts.workdir) ?? baseCommand.trim().split(/\s+/)[0] ?? baseCommand;
     const {
       policy: effectivePermissions,
       overrideRules,
