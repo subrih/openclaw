@@ -66,6 +66,15 @@ export function mergeAccessPolicy(
     const baseEntry = base.scripts?.[key] as
       | import("../config/types.tools.js").ScriptPolicyEntry
       | undefined;
+    // Reject non-object entries — a primitive (true, "rwx") is not a valid ScriptPolicyEntry.
+    // validateAccessPolicyConfig also catches this, but the merge layer must not propagate it.
+    if (
+      overrideEntry == null ||
+      typeof overrideEntry !== "object" ||
+      Array.isArray(overrideEntry)
+    ) {
+      continue;
+    }
     const overrideScriptEntry =
       overrideEntry as import("../config/types.tools.js").ScriptPolicyEntry;
     if (!baseEntry) {
@@ -123,7 +132,27 @@ function validateAccessPolicyFileStructure(filePath: string, parsed: unknown): s
         if (typeof block !== "object" || block === null || Array.isArray(block)) {
           errors.push(`${filePath}: agents["${agentId}"] must be an object`);
         } else {
-          checkRemovedKeys(block as Record<string, unknown>, `agents["${agentId}"]`);
+          const agentBlock = block as Record<string, unknown>;
+          checkRemovedKeys(agentBlock, `agents["${agentId}"]`);
+          // Recurse into per-script entries so old "deny"/"default" fields are caught there too.
+          const scripts = agentBlock["scripts"];
+          if (scripts != null && typeof scripts === "object" && !Array.isArray(scripts)) {
+            for (const [scriptKey, scriptEntry] of Object.entries(
+              scripts as Record<string, unknown>,
+            )) {
+              if (
+                scriptKey !== "policy" &&
+                scriptEntry != null &&
+                typeof scriptEntry === "object" &&
+                !Array.isArray(scriptEntry)
+              ) {
+                checkRemovedKeys(
+                  scriptEntry as Record<string, unknown>,
+                  `agents["${agentId}"].scripts["${scriptKey}"]`,
+                );
+              }
+            }
+          }
         }
       }
     }
@@ -298,7 +327,9 @@ export function resolveAccessPolicyForAgent(agentId?: string): AccessPolicyConfi
       // auto-expand diagnostics ("rule auto-expanded to ...") are informational
       // and the footer would mislead operators into thinking the policy is broken.
       if (errors.some((e) => !e.includes("auto-expanded") && !e.includes("mid-path wildcard"))) {
-        console.error(`[access-policy] Bad permission strings are treated as "---" (deny all).`);
+        console.error(
+          `[access-policy] Bad permission strings are treated as "---" (deny all) at the tool layer and OS sandbox layer.`,
+        );
       }
     }
   }

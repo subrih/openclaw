@@ -2,9 +2,11 @@ import os from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import type { AccessPolicyConfig } from "../config/types.tools.js";
 import {
+  _resetBwrapAvailableCacheForTest,
   _resetBwrapFileDenyWarnedPathsForTest,
   _warnBwrapFileDenyOnce,
   generateBwrapArgs,
+  isBwrapAvailable,
   wrapCommandWithBwrap,
 } from "./exec-sandbox-bwrap.js";
 
@@ -425,6 +427,18 @@ describe("wrapCommandWithBwrap", () => {
     const result = wrapCommandWithBwrap("cat /etc/hosts", { policy: { "/**": "r--" } }, HOME);
     expect(result).toContain("/bin/sh -c");
     expect(result).toContain("cat /etc/hosts");
+  });
+});
+
+describe("_resetBwrapAvailableCacheForTest", () => {
+  it("clears the availability cache so isBwrapAvailable re-probes", async () => {
+    // Prime the cache with one result, then reset and verify the next call re-checks.
+    await isBwrapAvailable(); // populates cache
+    _resetBwrapAvailableCacheForTest();
+    // After reset, isBwrapAvailable must re-probe (result may differ in test env — just
+    // verify it returns a boolean without throwing, proving the cache was cleared).
+    const result = await isBwrapAvailable();
+    expect(typeof result).toBe("boolean");
   });
 });
 

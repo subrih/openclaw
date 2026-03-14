@@ -135,7 +135,13 @@ function patternToSbplMatcher(pattern: string, homeDir: string, perm?: PermStr):
   return { matcher: sbplLiteral(base), approximate: false };
 }
 
+// Keep in sync with VALID_PERM_RE in access-policy.ts and exec-sandbox-bwrap.ts.
+const VALID_PERM_RE = /^[r-][w-][x-]$/;
+
 function permToOps(perm: PermStr): string[] {
+  if (!VALID_PERM_RE.test(perm)) {
+    return [];
+  }
   const ops: string[] = [];
   if (perm[0] === "r") {
     ops.push(SEATBELT_READ_OPS);
@@ -150,6 +156,10 @@ function permToOps(perm: PermStr): string[] {
 }
 
 function deniedOps(perm: PermStr): string[] {
+  // Malformed perm — deny everything (fail closed).
+  if (!VALID_PERM_RE.test(perm)) {
+    return [SEATBELT_READ_OPS, SEATBELT_WRITE_OPS, SEATBELT_EXEC_OPS];
+  }
   const ops: string[] = [];
   if (perm[0] !== "r") {
     ops.push(SEATBELT_READ_OPS);
@@ -184,7 +194,9 @@ export function generateSeatbeltProfile(
   lines.push("");
 
   // Determine base stance from the "/**" catch-all rule (replaces the removed `default` field).
-  const catchAllPerm = findBestRule("/**", config.policy ?? {}, homeDir) ?? "---";
+  const rawCatchAllPerm = findBestRule("/**", config.policy ?? {}, homeDir) ?? "---";
+  // Validate format before positional access — malformed perm falls back to "---" (fail closed).
+  const catchAllPerm = VALID_PERM_RE.test(rawCatchAllPerm) ? rawCatchAllPerm : "---";
   const defaultPerm = catchAllPerm; // alias for readability below
   const defaultAllowsAnything =
     catchAllPerm[0] === "r" || catchAllPerm[1] === "w" || catchAllPerm[2] === "x";
@@ -223,7 +235,10 @@ export function generateSeatbeltProfile(
     // unconditionally granting /tmp access when default: "---".
     // findBestRule probes both the path and path+"/" internally, so "/tmp" correctly
     // matches glob rules like "/tmp/**" without needing the "/tmp/." workaround.
-    const tmpPerm = findBestRule("/tmp", config.policy ?? {}, homeDir) ?? "---";
+    const rawTmpPerm = findBestRule("/tmp", config.policy ?? {}, homeDir) ?? "---";
+    // Validate before positional access — malformed perm falls back to "---" (fail closed),
+    // consistent with permToOps/deniedOps and the tool-layer permAllows guard.
+    const tmpPerm = VALID_PERM_RE.test(rawTmpPerm) ? rawTmpPerm : "---";
     // Emit read and write allowances independently so a read-only policy like
     // "/tmp/**": "r--" does not accidentally grant write access to /tmp.
     if (tmpPerm[0] === "r") {

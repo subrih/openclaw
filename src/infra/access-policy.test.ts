@@ -70,6 +70,73 @@ describe("validateAccessPolicyConfig", () => {
     expect(checkAccessPolicy(file, "read", config)).toBe("deny");
   });
 
+  it("rejects non-object script entries (e.g. a bare string or boolean)", () => {
+    // A primitive entry like "/deploy.sh": "rwx" or "/deploy.sh": true would bypass
+    // the exec gate — validateAccessPolicyConfig must reject it at load time.
+    const config: AccessPolicyConfig = {
+      scripts: {
+        "/deploy.sh": "rwx" as unknown as import("../config/types.tools.js").ScriptPolicyEntry,
+      },
+    };
+    const errs = validateAccessPolicyConfig(config);
+    expect(errs.some((e) => e.includes("/deploy.sh") && e.includes("must be an object"))).toBe(
+      true,
+    );
+  });
+
+  it("rejects a sha256 value with wrong length", () => {
+    const config: AccessPolicyConfig = {
+      scripts: {
+        "/deploy.sh": { sha256: "abc123" },
+      },
+    };
+    const errs = validateAccessPolicyConfig(config);
+    expect(errs.some((e) => e.includes("sha256") && e.includes("64-character"))).toBe(true);
+  });
+
+  it("rejects a sha256 value with non-hex characters", () => {
+    const config: AccessPolicyConfig = {
+      scripts: {
+        "/deploy.sh": { sha256: "z".repeat(64) },
+      },
+    };
+    const errs = validateAccessPolicyConfig(config);
+    expect(errs.some((e) => e.includes("sha256") && e.includes("64-character"))).toBe(true);
+  });
+
+  it("accepts a valid 64-char hex sha256", () => {
+    const config: AccessPolicyConfig = {
+      scripts: {
+        "/deploy.sh": { sha256: "a".repeat(64) },
+      },
+    };
+    expect(validateAccessPolicyConfig(config)).toEqual([]);
+  });
+
+  it("emits mid-path wildcard diagnostic for scripts['policy'] entries", () => {
+    const config: AccessPolicyConfig = {
+      scripts: {
+        policy: { "/home/*/workspace/**": "r--" },
+      },
+    };
+    const errs = validateAccessPolicyConfig(config);
+    expect(
+      errs.some((e) => e.includes("mid-path wildcard") && e.includes('scripts["policy"]')),
+    ).toBe(true);
+  });
+
+  it("emits mid-path wildcard diagnostic for per-script policy entries", () => {
+    const config: AccessPolicyConfig = {
+      scripts: {
+        "/deploy.sh": { policy: { "/home/*/workspace/**": "r--" } },
+      },
+    };
+    const errs = validateAccessPolicyConfig(config);
+    expect(errs.some((e) => e.includes("mid-path wildcard") && e.includes("/deploy.sh"))).toBe(
+      true,
+    );
+  });
+
   it("validates scripts[].policy perm strings and emits diagnostics for bad ones", () => {
     // A typo like "rwX" in a script's policy must produce a diagnostic, not silently
     // fail closed (which would deny exec with no operator-visible error).
@@ -713,6 +780,21 @@ describe("resolveArgv0", () => {
 
   it("handles multiple env assignments with quoted values", () => {
     const result = resolveArgv0("A='x y' B='p q' /bin/sh -c echo");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("handles env assignment with escaped quote inside double-quoted value", () => {
+    // MYVAR="a\"b" /usr/bin/python script.py — the \" inside the value must not
+    // truncate the match, which would leave `b"` as the next token and misidentify
+    // it as argv0 instead of /usr/bin/python.
+    const result = resolveArgv0('MYVAR="a\\"b" /bin/sh -c echo');
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/sh$/);
+  });
+
+  it("handles multiple env assignments with escaped quotes in values", () => {
+    const result = resolveArgv0('A="x\\"y" B="p\\"q" /bin/sh -c echo');
     expect(result).not.toBeNull();
     expect(result).toMatch(/sh$/);
   });

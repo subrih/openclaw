@@ -132,6 +132,15 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
             `access-policy.scripts["policy"]["${pattern}"] "${perm}" is invalid: must be exactly 3 chars (e.g. "rwx", "r--", "---")`,
           );
         }
+        if (
+          hasMidPathWildcard(pattern) &&
+          !_midPathWildcardWarned.has(`scripts:policy:${pattern}`)
+        ) {
+          _midPathWildcardWarned.add(`scripts:policy:${pattern}`);
+          errors.push(
+            `access-policy.scripts["policy"]["${pattern}"] contains a mid-path wildcard — OS-level enforcement uses prefix match (file-type filter is tool-layer only).`,
+          );
+        }
         autoExpandBareDir(sharedPolicy, pattern, perm, errors);
       }
     }
@@ -139,12 +148,39 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
       if (scriptPath === "policy") {
         continue; // handled above
       }
-      const scriptEntry = entry as import("../config/types.tools.js").ScriptPolicyEntry | undefined;
-      if (scriptEntry?.policy) {
+      // Reject non-object entries (e.g. true, "rwx") — a truthy primitive would
+      // bypass the exec gate in hasScriptOverride and applyScriptPolicyOverride.
+      if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
+        errors.push(
+          `access-policy.scripts["${scriptPath}"] must be an object (e.g. { sha256: "...", policy: {...} }), got ${JSON.stringify(entry)}`,
+        );
+        continue;
+      }
+      const scriptEntry = entry as import("../config/types.tools.js").ScriptPolicyEntry;
+      // Validate sha256 format when present — a typo causes silent exec denial at runtime.
+      if (scriptEntry.sha256 !== undefined) {
+        if (!/^[0-9a-f]{64}$/i.test(scriptEntry.sha256)) {
+          errors.push(
+            `access-policy.scripts["${scriptPath}"].sha256 "${scriptEntry.sha256}" is invalid: must be a 64-character lowercase hex string`,
+          );
+        }
+      }
+      if (scriptEntry.policy) {
         for (const [pattern, perm] of Object.entries(scriptEntry.policy)) {
           if (!PERM_STR_RE.test(perm)) {
             errors.push(
               `access-policy.scripts["${scriptPath}"].policy["${pattern}"] "${perm}" is invalid: must be exactly 3 chars (e.g. "rwx", "r--", "---")`,
+            );
+          }
+          // Emit mid-path wildcard diagnostic for per-script policy blocks,
+          // matching the same warning emitted for config.policy entries.
+          if (
+            hasMidPathWildcard(pattern) &&
+            !_midPathWildcardWarned.has(`scripts:${scriptPath}:${pattern}`)
+          ) {
+            _midPathWildcardWarned.add(`scripts:${scriptPath}:${pattern}`);
+            errors.push(
+              `access-policy.scripts["${scriptPath}"].policy["${pattern}"] contains a mid-path wildcard — OS-level enforcement uses prefix match (file-type filter is tool-layer only).`,
             );
           }
           autoExpandBareDir(scriptEntry.policy, pattern, perm, errors);
@@ -396,11 +432,14 @@ export function resolveArgv0(command: string, cwd?: string, _depth = 0): string 
     // FOO='a b') prevents misparse when a quoted env value contains spaces — a naive
     // whitespace-split would break FOO='a b' /script.sh into ["FOO='a", "b'", "/script.sh"]
     // and incorrectly treat "b'" as the argv0, bypassing script policy lookups.
-    const envPrefixRe = /^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s*/;
+    // Double-quoted values: allow backslash-escaped characters (e.g. "a\"b") so the
+    // regex doesn't truncate at the escaped quote and misidentify the next token as argv0.
+    // Single-quoted values: no escaping in POSIX sh single quotes, so [^']* is correct.
+    const envPrefixRe = /^[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S*)\s*/;
     let rest = trimmed;
     while (envPrefixRe.test(rest)) {
       // Capture a literal PATH= override; skip if the value contains $ (unexpandable).
-      const pathM = rest.match(/^PATH=(?:"([^"]*)"|'([^']*)'|(\S+))\s*/);
+      const pathM = rest.match(/^PATH=(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+))\s*/);
       if (pathM) {
         const val = pathM[1] ?? pathM[2] ?? pathM[3] ?? "";
         if (!val.includes("$")) {

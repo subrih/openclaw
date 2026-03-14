@@ -36,6 +36,10 @@ const _bwrapFileDenyWarnedPaths = new Set<string>();
 export function _resetBwrapFileDenyWarnedPathsForTest(): void {
   _bwrapFileDenyWarnedPaths.clear();
 }
+/** Reset the bwrap availability cache. Only for use in tests. */
+export function _resetBwrapAvailableCacheForTest(): void {
+  bwrapAvailableCache = undefined;
+}
 export function _warnBwrapFileDenyOnce(filePath: string): void {
   if (_bwrapFileDenyWarnedPaths.has(filePath)) {
     return;
@@ -116,8 +120,11 @@ function patternToPath(pattern: string, homeDir: string, perm?: PermStr): string
   return parentDir || "/";
 }
 
+// Keep in sync with VALID_PERM_RE in access-policy.ts and exec-sandbox-seatbelt.ts.
+const VALID_PERM_RE = /^[r-][w-][x-]$/;
+
 function permAllowsWrite(perm: PermStr): boolean {
-  return perm[1] === "w";
+  return VALID_PERM_RE.test(perm) && perm[1] === "w";
 }
 
 /**
@@ -143,7 +150,9 @@ export function generateBwrapArgs(
 ): string[] {
   const args: string[] = [];
   // Determine base stance from the "/**" catch-all rule (replaces the removed `default` field).
-  const catchAllPerm = findBestRule("/**", config.policy ?? {}, homeDir) ?? "---";
+  const rawCatchAllPerm = findBestRule("/**", config.policy ?? {}, homeDir) ?? "---";
+  // Validate format before positional access — malformed perm falls back to "---" (fail closed).
+  const catchAllPerm = VALID_PERM_RE.test(rawCatchAllPerm) ? rawCatchAllPerm : "---";
   const defaultAllowsRead = catchAllPerm[0] === "r";
 
   if (defaultAllowsRead) {

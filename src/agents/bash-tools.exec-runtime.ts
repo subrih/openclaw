@@ -390,9 +390,17 @@ export async function runExecProcess(opts: {
     // symlink keys ("/usr/bin/python" → /usr/bin/python3.12) match argv0, which
     // is always the realpathSync result from resolveArgv0.
     const _scripts = opts.permissions.scripts ?? {};
-    // Skip the reserved "policy" key — it holds shared rules, not a per-script entry.
-    const hasScriptOverride = Object.keys(_scripts).some(
-      (k) => k !== "policy" && path.normalize(resolveScriptKey(k)) === path.normalize(argv0),
+    // Skip the reserved "policy" key and malformed (non-object) entries — only a
+    // validated ScriptPolicyEntry object counts as a legitimate script override.
+    // A truthy primitive (true, "oops") would otherwise bypass the base exec gate
+    // even though applyScriptPolicyOverride already rejected the entry.
+    const hasScriptOverride = Object.entries(_scripts).some(
+      ([k, v]) =>
+        k !== "policy" &&
+        v != null &&
+        typeof v === "object" &&
+        !Array.isArray(v) &&
+        path.normalize(resolveScriptKey(k)) === path.normalize(argv0),
     );
     if (!hasScriptOverride && checkAccessPolicy(argv0, "exec", effectivePermissions) === "deny") {
       throw new Error(`exec denied by access policy: ${argv0}`);
