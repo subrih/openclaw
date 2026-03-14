@@ -115,6 +115,17 @@ describe("generateBwrapArgs", () => {
     expect(tmpfsMounts).toContain("/tmp");
   });
 
+  it("does not add --tmpfs /tmp in restrictive mode even with no explicit /tmp rule", () => {
+    // Regression guard: the defaultAllowsRead guard on the /tmp block must prevent
+    // a writable tmpfs being mounted under default:"---" when no /tmp rule exists.
+    // explicitTmpPerm === null is true (no rule), but defaultAllowsRead is false,
+    // so the entire /tmp block must be skipped.
+    const config: AccessPolicyConfig = { default: "---" };
+    const args = generateBwrapArgs(config, HOME);
+    const tmpfsMounts = args.map((a, i) => (a === "--tmpfs" ? args[i + 1] : null)).filter(Boolean);
+    expect(tmpfsMounts).not.toContain("/tmp");
+  });
+
   it("skips --tmpfs /tmp in permissive mode when policy explicitly restricts /tmp writes", () => {
     // A rule "/tmp/**": "r--" means the user wants /tmp read-only; the base --ro-bind / /
     // already makes it readable. Adding --tmpfs /tmp would silently grant write access.

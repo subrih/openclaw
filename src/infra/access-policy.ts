@@ -75,6 +75,29 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
     }
   }
 
+  if (config.scripts) {
+    for (const [scriptPath, entry] of Object.entries(config.scripts)) {
+      if (entry.rules) {
+        for (const [pattern, perm] of Object.entries(entry.rules)) {
+          if (!PERM_STR_RE.test(perm)) {
+            errors.push(
+              `access-policy.scripts["${scriptPath}"].rules["${pattern}"] "${perm}" is invalid: must be exactly 3 chars (e.g. "rwx", "r--", "---")`,
+            );
+          }
+        }
+      }
+      if (entry.deny) {
+        for (let i = 0; i < entry.deny.length; i++) {
+          if (!entry.deny[i]) {
+            errors.push(
+              `access-policy.scripts["${scriptPath}"].deny[${i}] must be a non-empty glob pattern`,
+            );
+          }
+        }
+      }
+    }
+  }
+
   if (config.deny) {
     for (let i = 0; i < config.deny.length; i++) {
       const pattern = config.deny[i];
@@ -110,8 +133,11 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
               .replace(/[/\\]$/, "")
               .split(/[/\\]/)
               .pop() ?? "";
-          // Has a dot that is not the leading dot (dotfile), and has chars after the dot.
-          looksLikeFile = /[^.]\.[^/\\]+$/.test(lastName);
+          // Has a dot that is not the leading dot (dotfile), and the extension
+          // contains at least one letter — this excludes version-like suffixes
+          // (.0, .3, -1.0, app-2.3) which look like versioned directory names.
+          // Examples: "secrets.key" → file; "v1.0" → directory; ".ssh" → directory.
+          looksLikeFile = /[^.]\.[a-zA-Z][^/\\]*$/.test(lastName);
         }
         if (!isExistingFile && !looksLikeFile) {
           const fixed = `${pattern}/**`;

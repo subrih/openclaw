@@ -143,14 +143,6 @@ export function generateBwrapArgs(
     // mount /proc so programs that read /proc/self/*, /proc/cpuinfo, etc. work
     // correctly inside the sandbox (shells, Python, most build tools need this).
     args.push("--proc", "/proc");
-    // Add writable /tmp tmpfs unless the policy has an explicit rule that denies
-    // write on /tmp. Without an explicit rule, /tmp is writable by default (needed
-    // by most processes for temp files). With an explicit "r--" or "---" rule on
-    // /tmp/**, respect it — /tmp remains read-only via the --ro-bind / / base.
-    const explicitTmpPerm = findBestRule("/tmp/.", config.rules ?? {}, homeDir);
-    if (explicitTmpPerm === null || explicitTmpPerm[1] === "w") {
-      args.push("--tmpfs", "/tmp");
-    }
     args.push("--dev", "/dev");
   } else {
     // Restrictive base: only bind system paths needed to run processes.
@@ -163,6 +155,18 @@ export function generateBwrapArgs(
     // /tmp is intentionally NOT mounted here — a restrictive policy (default:"---")
     // should not grant free write access to /tmp. Add a rule "/tmp/**": "rw-" if
     // the enclosed process genuinely needs it.
+  }
+
+  // Writable /tmp tmpfs — only in permissive mode AND only when the policy does not
+  // explicitly restrict writes on /tmp. Keeping this outside the if/else block above
+  // makes the defaultAllowsRead guard self-evident and not implicit from nesting.
+  // In restrictive mode (default:"---"), /tmp is intentionally omitted so rules
+  // control tmpfs access explicitly (e.g. "/tmp/**":"rwx" is handled by the rules loop).
+  if (defaultAllowsRead) {
+    const explicitTmpPerm = findBestRule("/tmp/.", config.rules ?? {}, homeDir);
+    if (explicitTmpPerm === null || explicitTmpPerm[1] === "w") {
+      args.push("--tmpfs", "/tmp");
+    }
   }
 
   // Apply rules: upgrade paths with w bit to read-write binds.

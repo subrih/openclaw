@@ -104,6 +104,18 @@ describe("validateAccessPolicyConfig", () => {
     expect(errs[0]).toMatch(/auto-expanded/);
   });
 
+  it("auto-expands non-existent versioned directory names (v1.0, app-2.3) in deny[]", () => {
+    // Versioned names like "v1.0" or "pkg-1.0.0" look like files via naive dot-detection
+    // but are almost always directories. The tightened heuristic requires the extension
+    // to contain at least one letter — digits-only extensions (like ".0") are treated as
+    // directory-like and expanded to /**.
+    const base = os.tmpdir();
+    const versionedDir = path.join(base, `openclaw-test-v1.0-${Date.now()}`);
+    const config: AccessPolicyConfig = { deny: [versionedDir] };
+    validateAccessPolicyConfig(config);
+    expect(config.deny?.[0]).toBe(`${versionedDir}/**`); // must be expanded
+  });
+
   it("does NOT auto-expand a non-existent deny[] path that looks like a file (has extension)", () => {
     // "~/future-secrets.key" doesn't exist yet but the extension heuristic should
     // prevent expansion to "~/future-secrets.key/**" — the user intends to protect
@@ -131,6 +143,32 @@ describe("validateAccessPolicyConfig", () => {
     const config: AccessPolicyConfig = { default: "rwx", deny: [file] };
     validateAccessPolicyConfig(config); // applies normalization in-place
     expect(checkAccessPolicy(file, "read", config)).toBe("deny");
+  });
+
+  it("validates scripts[].rules perm strings and emits diagnostics for bad ones", () => {
+    // A typo like "rwX" in a script's rules must produce a diagnostic, not silently
+    // fail closed (which would deny exec with no operator-visible error).
+    const config: AccessPolicyConfig = {
+      scripts: {
+        "/usr/local/bin/deploy.sh": {
+          rules: { "~/deploy/**": "rwX" }, // invalid: uppercase X
+        },
+      },
+    };
+    const errs = validateAccessPolicyConfig(config);
+    expect(errs.some((e) => e.includes("rwX") && e.includes("scripts"))).toBe(true);
+  });
+
+  it("validates scripts[].deny entries and emits diagnostics for empty patterns", () => {
+    const config: AccessPolicyConfig = {
+      scripts: {
+        "/usr/local/bin/deploy.sh": {
+          deny: ["", "~/.secrets/**"], // first entry is invalid empty string
+        },
+      },
+    };
+    const errs = validateAccessPolicyConfig(config);
+    expect(errs.some((e) => e.includes("scripts") && e.includes("deny"))).toBe(true);
   });
 
   it("accepts valid 'rwx' and '---' perm strings", () => {
