@@ -311,6 +311,11 @@ function _warnBwrapUnavailableOnce(): void {
   );
 }
 
+/** Reset the one-time bwrap-unavailable warning flag. Only for use in tests. */
+export function _resetBwrapUnavailableWarnedForTest(): void {
+  _bwrapUnavailableWarned = false;
+}
+
 let _windowsUnconfiguredWarned = false;
 function _warnWindowsUnconfiguredOnce(): void {
   if (_windowsUnconfiguredWarned) {
@@ -320,6 +325,11 @@ function _warnWindowsUnconfiguredOnce(): void {
   console.error(
     "[access-policy] WARNING: OS-level exec enforcement is not supported on Windows — exec commands run unconfined even when access-policy permissions are configured.",
   );
+}
+
+/** Reset the one-time Windows-unconfigured warning flag. Only for use in tests. */
+export function _resetWindowsUnconfiguredWarnedForTest(): void {
+  _windowsUnconfiguredWarned = false;
 }
 
 export async function runExecProcess(opts: {

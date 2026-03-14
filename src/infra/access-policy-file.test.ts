@@ -102,6 +102,61 @@ describe("mergeAccessPolicy", () => {
     expect(result?.deny).toBeUndefined();
     expect(result?.rules).toBeUndefined();
   });
+
+  it("scripts deep-merge: base sha256 is preserved when override supplies same script key", () => {
+    // Security regression: a shallow spread ({ ...base.scripts, ...override.scripts }) would
+    // silently drop the admin-configured sha256 hash check, defeating integrity enforcement.
+    const base = {
+      scripts: {
+        "/usr/local/bin/deploy.sh": {
+          sha256: "abc123",
+          rules: { "~/deploy/**": "rwx" as const },
+          deny: ["~/.ssh/**"],
+        },
+      },
+    };
+    const override = {
+      scripts: {
+        "/usr/local/bin/deploy.sh": {
+          // Agent block supplies same key — must NOT be able to drop sha256 or deny[].
+          rules: { "~/deploy/**": "r--" as const }, // narrower override — fine
+          deny: ["~/extra-deny/**"],
+        },
+      },
+    };
+    const result = mergeAccessPolicy(base, override);
+    const merged = result?.scripts?.["/usr/local/bin/deploy.sh"];
+    // sha256 from base must survive.
+    expect(merged?.sha256).toBe("abc123");
+    // deny[] must be additive — base deny cannot be removed.
+    expect(merged?.deny).toContain("~/.ssh/**");
+    expect(merged?.deny).toContain("~/extra-deny/**");
+    // rules: override key wins on collision.
+    expect(merged?.rules?.["~/deploy/**"]).toBe("r--");
+  });
+
+  it("scripts deep-merge: override-only script key is added verbatim", () => {
+    const base = { scripts: { "/bin/existing.sh": { sha256: "deadbeef" } } };
+    const override = {
+      scripts: { "/bin/new.sh": { rules: { "/tmp/**": "rwx" as const } } },
+    };
+    const result = mergeAccessPolicy(base, override);
+    // Base script untouched.
+    expect(result?.scripts?.["/bin/existing.sh"]?.sha256).toBe("deadbeef");
+    // New script from override is added.
+    expect(result?.scripts?.["/bin/new.sh"]?.rules?.["/tmp/**"]).toBe("rwx");
+  });
+
+  it("scripts deep-merge: base deny[] cannot be removed by override supplying empty deny[]", () => {
+    const base = {
+      scripts: { "/bin/s.sh": { deny: ["~/.secrets/**"] } },
+    };
+    const override = {
+      scripts: { "/bin/s.sh": { deny: [] } }, // empty override deny — base must survive
+    };
+    const result = mergeAccessPolicy(base, override);
+    expect(result?.scripts?.["/bin/s.sh"]?.deny).toContain("~/.secrets/**");
+  });
 });
 
 // ---------------------------------------------------------------------------

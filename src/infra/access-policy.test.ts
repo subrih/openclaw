@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { AccessPolicyConfig } from "../config/types.tools.js";
 import {
   _resetAutoExpandedWarnedForTest,
+  _resetMidPathWildcardWarnedForTest,
   applyScriptPolicyOverride,
   checkAccessPolicy,
   findBestRule,
@@ -26,6 +27,7 @@ const HOME = os.homedir();
 describe("validateAccessPolicyConfig", () => {
   beforeEach(() => {
     _resetAutoExpandedWarnedForTest();
+    _resetMidPathWildcardWarnedForTest();
   });
 
   it("returns no errors for a valid config", () => {
@@ -254,6 +256,48 @@ describe("validateAccessPolicyConfig", () => {
         rules: { "/nonexistent/path/that/cannot/exist-xyzzy": "r--" },
       }),
     ).toEqual([]);
+  });
+
+  it("emits a one-time diagnostic for mid-path wildcard rules (OS-level enforcement skipped)", () => {
+    _resetMidPathWildcardWarnedForTest();
+    // "/home/*/secrets/**" has a wildcard in a non-final segment — bwrap and
+    // Seatbelt cannot derive a concrete mount path so they skip it silently.
+    // validateAccessPolicyConfig must surface this so operators know.
+    const errs = validateAccessPolicyConfig({
+      rules: { "/home/*/secrets/**": "---" },
+    });
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatch(/mid-path wildcard/);
+    expect(errs[0]).toMatch(/OS-level.*enforcement/);
+  });
+
+  it("deduplicates mid-path wildcard rule diagnostics across calls", () => {
+    _resetMidPathWildcardWarnedForTest();
+    const config = { rules: { "/home/*/secrets/**": "---" } };
+    const first = validateAccessPolicyConfig(config);
+    const second = validateAccessPolicyConfig(config);
+    expect(first.filter((e) => e.includes("mid-path wildcard"))).toHaveLength(1);
+    expect(second.filter((e) => e.includes("mid-path wildcard"))).toHaveLength(0);
+  });
+
+  it("emits a one-time diagnostic for mid-path wildcard deny[] entries", () => {
+    _resetMidPathWildcardWarnedForTest();
+    const errs = validateAccessPolicyConfig({
+      deny: ["/tmp/*/sensitive/**"],
+    });
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatch(/mid-path wildcard/);
+    expect(errs[0]).toMatch(/OS-level.*enforcement/);
+  });
+
+  it("does NOT emit mid-path wildcard diagnostic for final-segment wildcards", () => {
+    _resetMidPathWildcardWarnedForTest();
+    // "/home/user/**" — wildcard is in the final segment, no path separator follows.
+    const errs = validateAccessPolicyConfig({
+      rules: { "/home/user/**": "r--", "~/**": "rwx" },
+      deny: ["/tmp/**"],
+    });
+    expect(errs.filter((e) => e.includes("mid-path wildcard"))).toHaveLength(0);
   });
 });
 

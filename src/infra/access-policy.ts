@@ -18,6 +18,28 @@ export function _resetAutoExpandedWarnedForTest(): void {
   _autoExpandedWarned.clear();
 }
 
+// Track mid-path wildcard patterns already warned about — one diagnostic per pattern.
+const _midPathWildcardWarned = new Set<string>();
+
+/** Reset the mid-path wildcard warning set. Only for use in tests. */
+export function _resetMidPathWildcardWarnedForTest(): void {
+  _midPathWildcardWarned.clear();
+}
+
+/**
+ * Returns true when a glob pattern has a wildcard character (*, ?, or bracket)
+ * in a non-final path segment (e.g. "/home/*\/secrets/**").
+ * bwrap and Seatbelt both skip such patterns at the OS layer because the
+ * concrete mount/deny path cannot be derived — only the tool layer enforces them.
+ */
+function hasMidPathWildcard(pattern: string): boolean {
+  const wildcardIdx = pattern.search(/[*?[]/);
+  if (wildcardIdx === -1) {
+    return false;
+  }
+  return /[/\\]/.test(pattern.slice(wildcardIdx));
+}
+
 /**
  * Validates and normalizes an AccessPolicyConfig for well-formedness.
  * Returns an array of human-readable diagnostic strings; empty = valid.
@@ -40,6 +62,12 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
       if (!PERM_STR_RE.test(perm)) {
         errors.push(
           `access-policy.rules["${pattern}"] "${perm}" is invalid: must be exactly 3 chars (e.g. "rwx", "r--", "---")`,
+        );
+      }
+      if (hasMidPathWildcard(pattern) && !_midPathWildcardWarned.has(`rules:${pattern}`)) {
+        _midPathWildcardWarned.add(`rules:${pattern}`);
+        errors.push(
+          `access-policy.rules["${pattern}"] contains a mid-path wildcard — OS-level (bwrap/Seatbelt) enforcement cannot apply; tool-layer enforcement is still active.`,
         );
       }
       // If a bare path (no glob metacharacters, no trailing /) points to a real
@@ -104,6 +132,12 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
       if (!pattern) {
         errors.push(`access-policy.deny[${i}] must be a non-empty glob pattern`);
         continue;
+      }
+      if (hasMidPathWildcard(pattern) && !_midPathWildcardWarned.has(`deny:${pattern}`)) {
+        _midPathWildcardWarned.add(`deny:${pattern}`);
+        errors.push(
+          `access-policy.deny entry "${pattern}" contains a mid-path wildcard — OS-level (bwrap/Seatbelt) enforcement cannot apply; tool-layer enforcement is still active.`,
+        );
       }
       // Bare-path auto-expand for directories: "~/.ssh" → "~/.ssh/**" so the
       // entire directory tree is denied, not just the directory inode itself.

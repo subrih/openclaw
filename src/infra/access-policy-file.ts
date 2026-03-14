@@ -50,8 +50,30 @@ export function mergeAccessPolicy(
   }
   const deny = [...(base.deny ?? []), ...(override.deny ?? [])];
   const rules = { ...base.rules, ...override.rules };
-  // scripts: shallow merge — override key wins (same semantics as rules)
-  const scripts = { ...base.scripts, ...override.scripts };
+  // scripts: deep-merge per key — base sha256 and deny[] are preserved regardless of
+  // what the agent override supplies. A plain spread ({ ...base.scripts, ...override.scripts })
+  // would silently drop the admin-configured hash integrity check and per-script deny list
+  // when an agent block supplies the same script key, defeating the security intent.
+  const mergedScripts: NonNullable<AccessPolicyConfig["scripts"]> = { ...base.scripts };
+  for (const [key, overrideEntry] of Object.entries(override.scripts ?? {})) {
+    const baseEntry = base.scripts?.[key];
+    if (!baseEntry) {
+      mergedScripts[key] = overrideEntry;
+      continue;
+    }
+    const entryDeny = [...(baseEntry.deny ?? []), ...(overrideEntry.deny ?? [])];
+    mergedScripts[key] = {
+      // sha256: base always wins — cannot be removed or replaced by an agent override.
+      ...(baseEntry.sha256 !== undefined ? { sha256: baseEntry.sha256 } : {}),
+      // rules: shallow-merge, override key wins on collision.
+      ...(Object.keys({ ...baseEntry.rules, ...overrideEntry.rules }).length > 0
+        ? { rules: { ...baseEntry.rules, ...overrideEntry.rules } }
+        : {}),
+      // deny: additive — base per-script deny cannot be removed.
+      ...(entryDeny.length > 0 ? { deny: entryDeny } : {}),
+    };
+  }
+  const scripts = Object.keys(mergedScripts).length > 0 ? mergedScripts : undefined;
   const result: AccessPolicyConfig = {};
   if (deny.length > 0) {
     result.deny = deny;
@@ -59,7 +81,7 @@ export function mergeAccessPolicy(
   if (Object.keys(rules).length > 0) {
     result.rules = rules;
   }
-  if (Object.keys(scripts).length > 0) {
+  if (scripts) {
     result.scripts = scripts;
   }
   if (override.default !== undefined) {
@@ -228,7 +250,7 @@ export function resolveAccessPolicyForAgent(agentId?: string): AccessPolicyConfi
       // Only print the footer when there are real permission-string errors —
       // auto-expand diagnostics ("rule auto-expanded to ...") are informational
       // and the footer would mislead operators into thinking the policy is broken.
-      if (errors.some((e) => !e.includes("auto-expanded"))) {
+      if (errors.some((e) => !e.includes("auto-expanded") && !e.includes("mid-path wildcard"))) {
         console.error(`[access-policy] Bad permission strings are treated as "---" (deny all).`);
       }
     }
