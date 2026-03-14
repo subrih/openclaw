@@ -16,54 +16,48 @@ describe("generateSeatbeltProfile", () => {
     expect(profile).toMatch(/^\(version 1\)/);
   });
 
-  it("uses (deny default) when default is ---", () => {
-    const profile = generateSeatbeltProfile({ default: "---" }, HOME);
+  it("uses (deny default) when no /**  catch-all rule", () => {
+    const profile = generateSeatbeltProfile({}, HOME);
     expect(profile).toContain("(deny default)");
     expect(profile).not.toContain("(allow default)");
   });
 
-  it("uses (allow default) when default has any permission", () => {
-    const profile = generateSeatbeltProfile({ default: "r--" }, HOME);
+  it("uses (allow default) when /** rule has any permission", () => {
+    const profile = generateSeatbeltProfile({ rules: { "/**": "r--" } }, HOME);
     expect(profile).toContain("(allow default)");
     expect(profile).not.toContain("(deny default)");
   });
 
-  it("includes system baseline reads when default is ---", () => {
-    const profile = generateSeatbeltProfile({ default: "---" }, HOME);
+  it("includes system baseline reads when no catch-all rule", () => {
+    const profile = generateSeatbeltProfile({}, HOME);
     expect(profile).toContain("(allow file-read*");
     expect(profile).toContain("/usr/lib");
     expect(profile).toContain("/System/Library");
   });
 
-  skipOnWindows("deny list entries appear as deny file-read*, file-write*, process-exec*", () => {
+  skipOnWindows("--- rule emits deny file-read*, file-write*, process-exec* for that path", () => {
     const config: AccessPolicyConfig = {
-      deny: [`${HOME}/.ssh/**`],
-      default: "rwx",
+      rules: { "/**": "rwx", [`${HOME}/.ssh/**`]: "---" },
     };
     const profile = generateSeatbeltProfile(config, HOME);
     expect(profile).toContain(`(deny file-read*`);
     expect(profile).toContain(`(deny file-write*`);
     expect(profile).toContain(`(deny process-exec*`);
-    // Should contain the path
     expect(profile).toContain(HOME + "/.ssh");
   });
 
-  skipOnWindows("expands ~ in deny patterns using provided homeDir", () => {
+  skipOnWindows("expands ~ in --- rules using provided homeDir", () => {
     const config: AccessPolicyConfig = {
-      deny: ["~/.ssh/**"],
-      default: "rwx",
+      rules: { "/**": "rwx", "~/.ssh/**": "---" },
     };
     const profile = generateSeatbeltProfile(config, HOME);
     expect(profile).toContain(HOME + "/.ssh");
-    // Should NOT contain literal ~
-    const denySection = profile.split("; Deny list")[1] ?? "";
-    expect(denySection).not.toContain("~/.ssh");
+    expect(profile).not.toContain("~/.ssh");
   });
 
   skipOnWindows("expands ~ in rules using provided homeDir", () => {
     const config: AccessPolicyConfig = {
       rules: { "~/**": "rw-" },
-      default: "---",
     };
     const profile = generateSeatbeltProfile(config, HOME);
     expect(profile).toContain(HOME);
@@ -72,7 +66,6 @@ describe("generateSeatbeltProfile", () => {
   it("rw- rule emits allow read+write, deny exec for that path", () => {
     const config: AccessPolicyConfig = {
       rules: { [`${HOME}/workspace/**`]: "rw-" },
-      default: "---",
     };
     const profile = generateSeatbeltProfile(config, HOME);
     expect(profile).toContain(`(allow file-read*`);
@@ -83,7 +76,6 @@ describe("generateSeatbeltProfile", () => {
   it("r-x rule emits allow read+exec, deny write for that path", () => {
     const config: AccessPolicyConfig = {
       rules: { "/usr/bin/**": "r-x" },
-      default: "---",
     };
     const profile = generateSeatbeltProfile(config, HOME);
     const rulesSection = profile.split("; User-defined path rules")[1] ?? "";
@@ -92,17 +84,19 @@ describe("generateSeatbeltProfile", () => {
     expect(rulesSection).toContain("(deny file-write*");
   });
 
-  it("deny list section appears after rules section", () => {
+  it("narrowing --- rule appears after broader allow rule in profile", () => {
+    // SBPL last-match-wins: the --- rule for .ssh must appear after the broader rwx rule.
     const config: AccessPolicyConfig = {
-      rules: { [`${HOME}/**`]: "rwx" },
-      deny: [`${HOME}/.ssh/**`],
-      default: "r--",
+      rules: { [`${HOME}/**`]: "rwx", [`${HOME}/.ssh/**`]: "---" },
     };
     const profile = generateSeatbeltProfile(config, HOME);
     const rulesIdx = profile.indexOf("; User-defined path rules");
-    const denyIdx = profile.indexOf("; Deny list");
     expect(rulesIdx).toBeGreaterThan(-1);
-    expect(denyIdx).toBeGreaterThan(rulesIdx);
+    // The broader allow must appear before the narrowing deny.
+    const allowIdx = profile.indexOf("(allow file-read*");
+    const denyIdx = profile.lastIndexOf("(deny file-read*");
+    expect(allowIdx).toBeGreaterThan(-1);
+    expect(denyIdx).toBeGreaterThan(allowIdx);
   });
 
   it("handles empty config without throwing", () => {
@@ -110,18 +104,17 @@ describe("generateSeatbeltProfile", () => {
   });
 
   it("permissive base with no exec bit includes system baseline exec paths", () => {
-    // default:"r--" emits (deny process-exec* (subpath "/")) but must also allow
+    // "/**": "r--" emits (deny process-exec* (subpath "/")) but must also allow
     // system binaries — otherwise ls, grep, cat all fail inside the sandbox.
-    const profile = generateSeatbeltProfile({ default: "r--" }, HOME);
+    const profile = generateSeatbeltProfile({ rules: { "/**": "r--" } }, HOME);
     expect(profile).toContain("(allow process-exec*");
     expect(profile).toContain("/bin");
     expect(profile).toContain("/usr/bin");
   });
 
   it("permissive base with exec bit does NOT add redundant exec baseline", () => {
-    // default:"rwx" already allows everything including exec — no extra baseline needed.
-    const profile = generateSeatbeltProfile({ default: "rwx" }, HOME);
-    // (allow default) covers exec; no separate baseline exec section needed
+    // "/**": "rwx" already allows everything including exec — no extra baseline needed.
+    const profile = generateSeatbeltProfile({ rules: { "/**": "rwx" } }, HOME);
     expect(profile).toContain("(allow default)");
     expect(profile).not.toContain("System baseline exec");
   });
@@ -131,7 +124,6 @@ describe("generateSeatbeltProfile", () => {
     // Without deny ops in the override block, write would still be allowed.
     const config: AccessPolicyConfig = {
       rules: { [`${HOME}/workspace/**`]: "rw-" },
-      default: "---",
     };
     const overrideRules: Record<string, string> = { [`${HOME}/workspace/locked/**`]: "r--" };
     const profile = generateSeatbeltProfile(config, HOME, overrideRules);
@@ -141,70 +133,37 @@ describe("generateSeatbeltProfile", () => {
     expect(overrideSection).toContain(`${HOME}/workspace/locked`);
   });
 
-  it("omits /private/tmp baseline when default is --- and no rule grants /tmp", () => {
-    // In restrictive mode without an explicit /tmp rule, /tmp should NOT be in
-    // the baseline — emitting it unconditionally would contradict default: "---".
-    const config: AccessPolicyConfig = { default: "---" };
-    const profile = generateSeatbeltProfile(config, HOME);
+  it("omits /private/tmp baseline when no rule grants /tmp", () => {
+    const profile = generateSeatbeltProfile({}, HOME);
     expect(profile).not.toContain(`(subpath "/private/tmp")`);
   });
 
   it("includes /private/tmp baseline when a rule grants read access to /tmp", () => {
-    const config: AccessPolicyConfig = {
-      default: "---",
-      rules: { "/tmp/**": "rw-" },
-    };
-    const profile = generateSeatbeltProfile(config, HOME);
+    const profile = generateSeatbeltProfile({ rules: { "/tmp/**": "rw-" } }, HOME);
     expect(profile).toContain(`(subpath "/private/tmp")`);
   });
 
   it("read-only /tmp rule does not grant file-write* on /private/tmp", () => {
-    // A policy of "/tmp/**": "r--" must grant reads but NOT writes to /tmp.
-    // The old code used (r || w) as the gate for both ops, so r-- inadvertently
-    // granted file-write* alongside read ops.
-    const config: AccessPolicyConfig = {
-      default: "---",
-      rules: { "/tmp/**": "r--" },
-    };
-    const profile = generateSeatbeltProfile(config, HOME);
-    // Read ops must be allowed for /tmp.
+    const profile = generateSeatbeltProfile({ rules: { "/tmp/**": "r--" } }, HOME);
     expect(profile).toMatch(/allow file-read[^)]*\(subpath "\/private\/tmp"\)/);
-    // Write must NOT be present for /tmp.
     expect(profile).not.toMatch(/allow file-write\*[^)]*\(subpath "\/private\/tmp"\)/);
   });
 
   it("write-only /tmp rule grants file-write* but not read ops on /private/tmp", () => {
-    const config: AccessPolicyConfig = {
-      default: "---",
-      rules: { "/tmp/**": "-w-" },
-    };
-    const profile = generateSeatbeltProfile(config, HOME);
+    const profile = generateSeatbeltProfile({ rules: { "/tmp/**": "-w-" } }, HOME);
     expect(profile).toMatch(/allow file-write\*[^)]*\(subpath "\/private\/tmp"\)/);
     expect(profile).not.toMatch(/allow file-read[^)]*\(subpath "\/private\/tmp"\)/);
   });
 
-  it("exec-only /tmp rule grants process-exec* on /private/tmp in restrictive mode", () => {
-    // Regression: when default:"---" and a rule grants exec on /tmp (e.g. "--x"),
-    // the seatbelt profile must emit (allow process-exec* (subpath "/private/tmp")).
-    // Without this fix, no exec allowance was emitted and binaries in /tmp could not
-    // be executed even though the policy explicitly permitted it.
-    const config: AccessPolicyConfig = {
-      default: "---",
-      rules: { "/tmp/**": "--x" },
-    };
-    const profile = generateSeatbeltProfile(config, HOME);
+  it("exec-only /tmp rule grants process-exec* on /private/tmp", () => {
+    const profile = generateSeatbeltProfile({ rules: { "/tmp/**": "--x" } }, HOME);
     expect(profile).toMatch(/allow process-exec\*[^)]*\(subpath "\/private\/tmp"\)/);
-    // Read and write must NOT be granted.
     expect(profile).not.toMatch(/allow file-read[^)]*\(subpath "\/private\/tmp"\)/);
     expect(profile).not.toMatch(/allow file-write\*[^)]*\(subpath "\/private\/tmp"\)/);
   });
 
-  it("r-x /tmp rule grants both read and exec on /private/tmp in restrictive mode", () => {
-    const config: AccessPolicyConfig = {
-      default: "---",
-      rules: { "/tmp/**": "r-x" },
-    };
-    const profile = generateSeatbeltProfile(config, HOME);
+  it("r-x /tmp rule grants both read and exec on /private/tmp", () => {
+    const profile = generateSeatbeltProfile({ rules: { "/tmp/**": "r-x" } }, HOME);
     expect(profile).toMatch(/allow file-read[^)]*\(subpath "\/private\/tmp"\)/);
     expect(profile).toMatch(/allow process-exec\*[^)]*\(subpath "\/private\/tmp"\)/);
     expect(profile).not.toMatch(/allow file-write\*[^)]*\(subpath "\/private\/tmp"\)/);
@@ -221,14 +180,15 @@ describe("generateSeatbeltProfile", () => {
   // ---------------------------------------------------------------------------
 
   skipOnWindows(
-    "deny list for sensitive path appears after workspace allow — symlink to deny target is blocked",
+    "--- rule for sensitive path appears after workspace allow — symlink to deny target is blocked",
     () => {
       // If ~/workspace/link → ~/.ssh/id_rsa, seatbelt evaluates ~/.ssh/id_rsa.
-      // The deny entry for ~/.ssh must appear after the workspace allow so it wins.
+      // The --- rule for ~/.ssh must appear after the workspace allow so it wins.
       const config: AccessPolicyConfig = {
-        rules: { [`${HOME}/workspace/**`]: "rw-" },
-        deny: [`${HOME}/.ssh/**`],
-        default: "---",
+        rules: {
+          [`${HOME}/workspace/**`]: "rw-",
+          [`${HOME}/.ssh/**`]: "---",
+        },
       };
       const profile = generateSeatbeltProfile(config, HOME);
       const workspaceAllowIdx = profile.indexOf("(allow file-read*");
@@ -243,16 +203,11 @@ describe("generateSeatbeltProfile", () => {
   skipOnWindows(
     "restrictive rule on subdir appears after broader rw rule — covers symlink to restricted subtree",
     () => {
-      // ~/workspace/** is rw-, ~/workspace/secret/** is r--.
-      // A symlink ~/workspace/link → ~/workspace/secret/file: seatbelt sees the
-      // real path ~/workspace/secret/... which must hit the narrower r-- rule.
-      // The deny write for secret must appear after the allow write for workspace.
       const config: AccessPolicyConfig = {
         rules: {
           [`${HOME}/workspace/**`]: "rw-",
           [`${HOME}/workspace/secret/**`]: "r--",
         },
-        default: "---",
       };
       const profile = generateSeatbeltProfile(config, HOME);
       const workspaceWriteIdx = profile.indexOf("(allow file-write*");
@@ -265,11 +220,9 @@ describe("generateSeatbeltProfile", () => {
 
   it("glob patterns are stripped to their longest concrete prefix", () => {
     const config: AccessPolicyConfig = {
-      deny: ["/Users/kaveri/.ssh/**"],
-      default: "rwx",
+      rules: { "/Users/kaveri/.ssh/**": "---", "/**": "rwx" },
     };
     const profile = generateSeatbeltProfile(config, "/Users/kaveri");
-    // ** should not appear in profile — stripped to subpath
     expect(profile).not.toContain("**");
     expect(profile).toContain("/Users/kaveri/.ssh");
   });

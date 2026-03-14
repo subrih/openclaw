@@ -170,10 +170,11 @@ export function generateSeatbeltProfile(
   lines.push("(version 1)");
   lines.push("");
 
-  // Determine base stance from default permission.
-  const defaultPerm = config.default ?? "---";
+  // Determine base stance from the "/**" catch-all rule (replaces the removed `default` field).
+  const catchAllPerm = findBestRule("/**", config.rules ?? {}, homeDir) ?? "---";
+  const defaultPerm = catchAllPerm; // alias for readability below
   const defaultAllowsAnything =
-    defaultPerm[0] === "r" || defaultPerm[1] === "w" || defaultPerm[2] === "x";
+    catchAllPerm[0] === "r" || catchAllPerm[1] === "w" || catchAllPerm[2] === "x";
 
   if (defaultAllowsAnything) {
     // Permissive base: allow everything, then restrict.
@@ -209,7 +210,7 @@ export function generateSeatbeltProfile(
     // unconditionally granting /tmp access when default: "---".
     // Use "/tmp/." so glob rules like "/tmp/**" match correctly — findBestRule
     // on "/tmp" alone would miss "/**"-suffixed patterns that only match descendants.
-    const tmpPerm = findBestRule("/tmp/.", config.rules ?? {}, homeDir) ?? config.default ?? "---";
+    const tmpPerm = findBestRule("/tmp/.", config.rules ?? {}, homeDir) ?? "---";
     // Emit read and write allowances independently so a read-only policy like
     // "/tmp/**": "r--" does not accidentally grant write access to /tmp.
     if (tmpPerm[0] === "r") {
@@ -262,24 +263,7 @@ export function generateSeatbeltProfile(
     }
   }
 
-  // deny[] entries — always win over base rules.
-  if ((config.deny ?? []).length > 0) {
-    lines.push("");
-    lines.push("; Deny list — wins over base rules");
-    for (const pattern of config.deny ?? []) {
-      for (const expanded of expandSbplAliases(pattern)) {
-        const matcher = patternToSbplMatcher(expanded, homeDir);
-        if (!matcher) {
-          continue;
-        }
-        lines.push(`(deny ${SEATBELT_READ_OPS} ${matcher})`);
-        lines.push(`(deny ${SEATBELT_WRITE_OPS} ${matcher})`);
-        lines.push(`(deny ${SEATBELT_EXEC_OPS} ${matcher})`);
-      }
-    }
-  }
-
-  // Script-override rules emitted last — they win over deny entries above.
+  // Script-override rules emitted last — they win over base rules above.
   // Required when a script grant covers a path inside a denied subtree.
   // In SBPL, last matching rule wins.
   if (scriptOverrideRules && Object.keys(scriptOverrideRules).length > 0) {

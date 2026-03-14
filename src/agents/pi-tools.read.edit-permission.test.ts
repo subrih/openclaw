@@ -55,7 +55,6 @@ describe("createHostWorkspaceEditTool edit read-permission check", () => {
       // "-w-" policy: write allowed, read denied.
       // Edit must NOT be allowed to read the file even if write is permitted.
       const permissions: AccessPolicyConfig = {
-        default: "---",
         rules: { [`${tmpDir}/**`]: "-w-" },
       };
       createHostWorkspaceEditTool(tmpDir, { workspaceOnly: false, permissions });
@@ -73,7 +72,6 @@ describe("createHostWorkspaceEditTool edit read-permission check", () => {
       await fs.writeFile(filePath, "content", "utf8");
 
       const permissions: AccessPolicyConfig = {
-        default: "---",
         rules: { [`${tmpDir}/**`]: "rw-" },
       };
       createHostWorkspaceEditTool(tmpDir, { workspaceOnly: false, permissions });
@@ -92,7 +90,6 @@ describe("createHostWorkspaceEditTool edit read-permission check", () => {
 
       // "r--" policy: read allowed, write denied.
       const permissions: AccessPolicyConfig = {
-        default: "---",
         rules: { [`${tmpDir}/**`]: "r--" },
       };
       createHostWorkspaceEditTool(tmpDir, { workspaceOnly: false, permissions });

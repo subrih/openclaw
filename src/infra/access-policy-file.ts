@@ -15,9 +15,8 @@ export type AccessPolicyFile = {
    *   base → agents["*"] → agents[agentId]
    *
    * Within each layer:
-   *   - deny:    additive (concat) — a base deny entry can never be removed by an override
    *   - rules:   shallow-merge, override key wins on collision
-   *   - default: override wins if set
+   *   - scripts: deep-merge per key; base sha256 is preserved
    */
   agents?: Record<string, AccessPolicyConfig>;
 };
@@ -31,9 +30,8 @@ export function resolveAccessPolicyPath(): string {
 
 /**
  * Merge two AccessPolicyConfig layers.
- * - deny:    additive (cannot remove a base deny)
  * - rules:   shallow merge, override key wins
- * - default: override wins if set
+ * - scripts: deep-merge per key; base sha256 is preserved (cannot be removed by override)
  */
 export function mergeAccessPolicy(
   base: AccessPolicyConfig | undefined,
@@ -48,12 +46,11 @@ export function mergeAccessPolicy(
   if (!override) {
     return base;
   }
-  const deny = [...(base.deny ?? []), ...(override.deny ?? [])];
   const rules = { ...base.rules, ...override.rules };
-  // scripts: deep-merge per key — base sha256 and deny[] are preserved regardless of
+  // scripts: deep-merge per key — base sha256 is preserved regardless of
   // what the agent override supplies. A plain spread ({ ...base.scripts, ...override.scripts })
-  // would silently drop the admin-configured hash integrity check and per-script deny list
-  // when an agent block supplies the same script key, defeating the security intent.
+  // would silently drop the admin-configured hash integrity check when an agent block
+  // supplies the same script key, defeating the security intent.
   const mergedScripts: NonNullable<AccessPolicyConfig["scripts"]> = { ...base.scripts };
   for (const [key, overrideEntry] of Object.entries(override.scripts ?? {})) {
     const baseEntry = base.scripts?.[key];
@@ -61,7 +58,6 @@ export function mergeAccessPolicy(
       mergedScripts[key] = overrideEntry;
       continue;
     }
-    const entryDeny = [...(baseEntry.deny ?? []), ...(overrideEntry.deny ?? [])];
     mergedScripts[key] = {
       // sha256: base always wins — cannot be removed or replaced by an agent override.
       ...(baseEntry.sha256 !== undefined ? { sha256: baseEntry.sha256 } : {}),
@@ -69,25 +65,15 @@ export function mergeAccessPolicy(
       ...(Object.keys({ ...baseEntry.rules, ...overrideEntry.rules }).length > 0
         ? { rules: { ...baseEntry.rules, ...overrideEntry.rules } }
         : {}),
-      // deny: additive — base per-script deny cannot be removed.
-      ...(entryDeny.length > 0 ? { deny: entryDeny } : {}),
     };
   }
   const scripts = Object.keys(mergedScripts).length > 0 ? mergedScripts : undefined;
   const result: AccessPolicyConfig = {};
-  if (deny.length > 0) {
-    result.deny = deny;
-  }
   if (Object.keys(rules).length > 0) {
     result.rules = rules;
   }
   if (scripts) {
     result.scripts = scripts;
-  }
-  if (override.default !== undefined) {
-    result.default = override.default;
-  } else if (base.default !== undefined) {
-    result.default = base.default;
   }
   return result;
 }
@@ -119,8 +105,8 @@ function validateAccessPolicyFileStructure(filePath: string, parsed: unknown): s
   }
 
   // Catch common mistake: AccessPolicyConfig fields accidentally at top level
-  // (e.g. user puts "rules" or "deny" directly instead of under "base").
-  for (const key of ["rules", "deny", "default", "scripts"] as const) {
+  // (e.g. user puts "rules" or "scripts" directly instead of under "base").
+  for (const key of ["rules", "scripts"] as const) {
     if (p[key] !== undefined) {
       errors.push(
         `${filePath}: unexpected top-level key "${key}" — did you mean to put it under "base"?`,
@@ -249,8 +235,9 @@ export function _resetNotFoundWarnedForTest(): void {
  * Logs errors on invalid perm strings but does not throw — bad strings fall back to
  * deny-all for that entry (handled downstream by checkAccessPolicy's permAllows logic).
  */
-/** Deny-all policy returned when the policy file is present but broken (fail-closed). */
-const DENY_ALL_POLICY: AccessPolicyConfig = Object.freeze({ default: "---" });
+/** Deny-all policy returned when the policy file is present but broken (fail-closed).
+ * Empty rules + implicit "---" fallback = deny everything. */
+const DENY_ALL_POLICY: AccessPolicyConfig = Object.freeze({});
 
 export function resolveAccessPolicyForAgent(agentId?: string): AccessPolicyConfig | undefined {
   const file = loadAccessPolicyFile();

@@ -43,16 +43,10 @@ function hasMidPathWildcard(pattern: string): boolean {
 /**
  * Validates and normalizes an AccessPolicyConfig for well-formedness.
  * Returns an array of human-readable diagnostic strings; empty = valid.
- * May mutate config.rules and config.deny in place (e.g. auto-expanding bare directory paths).
+ * May mutate config.rules in place (e.g. auto-expanding bare directory paths).
  */
 export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[] {
   const errors: string[] = [];
-
-  if (config.default !== undefined && !PERM_STR_RE.test(config.default)) {
-    errors.push(
-      `access-policy.default "${config.default}" is invalid: must be exactly 3 chars (e.g. "rwx", "r--", "---")`,
-    );
-  }
 
   if (config.rules) {
     for (const [pattern, perm] of Object.entries(config.rules)) {
@@ -110,83 +104,6 @@ export function validateAccessPolicyConfig(config: AccessPolicyConfig): string[]
           if (!PERM_STR_RE.test(perm)) {
             errors.push(
               `access-policy.scripts["${scriptPath}"].rules["${pattern}"] "${perm}" is invalid: must be exactly 3 chars (e.g. "rwx", "r--", "---")`,
-            );
-          }
-        }
-      }
-      if (entry.deny) {
-        for (let i = 0; i < entry.deny.length; i++) {
-          if (!entry.deny[i]) {
-            errors.push(
-              `access-policy.scripts["${scriptPath}"].deny[${i}] must be a non-empty glob pattern`,
-            );
-          }
-        }
-      }
-    }
-  }
-
-  if (config.deny) {
-    for (let i = 0; i < config.deny.length; i++) {
-      const pattern = config.deny[i];
-      if (!pattern) {
-        errors.push(`access-policy.deny[${i}] must be a non-empty glob pattern`);
-        continue;
-      }
-      if (hasMidPathWildcard(pattern) && !_midPathWildcardWarned.has(`deny:${pattern}`)) {
-        _midPathWildcardWarned.add(`deny:${pattern}`);
-        errors.push(
-          `access-policy.deny entry "${pattern}" contains a mid-path wildcard — OS-level (bwrap/Seatbelt) enforcement cannot apply; tool-layer enforcement is still active.`,
-        );
-      }
-      // Bare-path auto-expand for directories: "~/.ssh" → "~/.ssh/**" so the
-      // entire directory tree is denied, not just the directory inode itself.
-      // For paths that exist and are confirmed files (statSync), keep the bare
-      // pattern — expanding to "/**" would only match non-existent children,
-      // leaving the file itself unprotected at both the tool layer and bwrap.
-      // Non-existent paths are treated as future directories and always expanded
-      // so the subtree is protected before the directory is created.
-      if (!pattern.endsWith("/") && !/[*?[]/.test(pattern)) {
-        const expandedForStat = pattern.startsWith("~")
-          ? pattern.replace(/^~(?=$|[/\\])/, os.homedir())
-          : pattern;
-        let isExistingFile = false;
-        // For non-existent paths: treat as a future file (skip /**-expansion) when
-        // the last segment looks like a filename — has a dot but is not a dotfile-only
-        // name (e.g. ".ssh") and has a non-empty extension (e.g. "secrets.key").
-        // This preserves the intent of "deny: ['~/future-secrets.key']" where the
-        // user wants to protect that specific file once it is created.
-        // Plain names without an extension (e.g. "myfolder") are still treated as
-        // future directories and expanded to /**.
-        let looksLikeFile = false;
-        try {
-          isExistingFile = !fs.statSync(expandedForStat).isDirectory();
-        } catch {
-          const lastName =
-            expandedForStat
-              .replace(/[/\\]$/, "")
-              .split(/[/\\]/)
-              .pop() ?? "";
-          // Looks like a file when the last segment has a non-leading dot followed by a
-          // letter-containing extension — covers "secrets.key", "config.json".
-          // Note: pure dotnames like ".npmrc", ".env", ".ssh" do NOT match this regex
-          // (they have no non-leading dot) and are therefore expanded to /** below.
-          // Digit-only suffixes (v1.0, app-2.3) are treated as versioned directory names.
-          // Bare dotnames without a secondary extension (.ssh, .aws, .env, .gnupg) are
-          // NOT treated as file-like: they are expanded to /** so the subtree is protected
-          // when the path does not yet exist. For .env-style plain files the expansion is
-          // conservative but safe — once the file exists, statSync confirms it and the bare
-          // path is kept. The leading-dot heuristic was removed because it also matched
-          // common directory names (.ssh, .aws, .config) and silently skipped expansion.
-          looksLikeFile = /[^.]\.[a-zA-Z][^/\\]*$/.test(lastName);
-        }
-        if (!isExistingFile && !looksLikeFile) {
-          const fixed = `${pattern}/**`;
-          config.deny[i] = fixed;
-          if (!_autoExpandedWarned.has(`deny:${pattern}`)) {
-            _autoExpandedWarned.add(`deny:${pattern}`);
-            errors.push(
-              `access-policy.deny["${pattern}"] auto-expanded to "${fixed}" so it covers all directory contents.`,
             );
           }
         }
@@ -313,9 +230,9 @@ export function findBestRule(
  * Checks whether a given operation on targetPath is permitted by the config.
  *
  * Precedence:
- *   1. deny[] — any matching glob always blocks, no override.
- *   2. rules  — longest matching glob wins; check the relevant bit.
- *   3. default — catch-all (treated as "---" when absent).
+ *   1. rules  — longest matching glob wins; check the relevant bit.
+ *   2. implicit fallback — `"---"` (deny-all) when no rule matches.
+ *      Use `"/**": "r--"` (or any other perm) as an explicit catch-all rule.
  */
 export function checkAccessPolicy(
   targetPath: string,
@@ -341,16 +258,7 @@ export function checkAccessPolicy(
     );
   }
 
-  // 1. deny list always wins.
-  for (const pattern of config.deny ?? []) {
-    // Normalize so /private/tmp/** patterns match /tmp/** targets on macOS.
-    const expanded = normalizePlatformPath(expandPattern(pattern, homeDir));
-    if (matchesPattern(expanded)) {
-      return "deny";
-    }
-  }
-
-  // 2. rules — longest match wins (check both path and path + "/" variants).
+  // rules — longest match wins (check both path and path + "/" variants).
   let bestPerm: PermStr | null = null;
   let bestLen = -1;
   for (const [pattern, perm] of Object.entries(config.rules ?? {})) {
@@ -365,8 +273,8 @@ export function checkAccessPolicy(
     return permAllows(bestPerm, op) ? "allow" : "deny";
   }
 
-  // 3. default catch-all (absent = "---" = deny all).
-  return permAllows(config.default, op) ? "allow" : "deny";
+  // Implicit fallback: "---" (deny-all) when no rule matches.
+  return "deny";
 }
 
 /**
@@ -637,16 +545,11 @@ export function applyScriptPolicyOverride(
 
   // Build the merged policy WITHOUT the override rules merged in.
   // Override rules are returned separately so the caller can emit them AFTER
-  // the deny list in the seatbelt profile (last-match-wins — grants must come
-  // after deny entries to override broad deny patterns like ~/.secrets/**).
+  // the base rules in the seatbelt profile (last-match-wins — grants must come
+  // after broader rules to override them, e.g. a script-specific grant inside
+  // a broadly denied subtree).
   const { scripts: _scripts, ...base } = policy;
-  const merged: AccessPolicyConfig = {
-    ...base,
-    deny: [...(base.deny ?? []), ...(override.deny ?? [])],
-  };
-  if (merged.deny?.length === 0) {
-    delete merged.deny;
-  }
+  const merged: AccessPolicyConfig = { ...base };
   return {
     policy: merged,
     overrideRules:

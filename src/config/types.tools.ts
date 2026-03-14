@@ -10,8 +10,6 @@ export type PermStr = string;
 export type ScriptPolicyEntry = {
   /** Restrict/expand rules for this script. Merged over the base policy rules. */
   rules?: Record<string, PermStr>;
-  /** Additional deny patterns added when this script runs (additive). */
-  deny?: string[];
   /** SHA-256 hex of the script file for integrity checking (best-effort, not atomic). */
   sha256?: string;
 };
@@ -19,14 +17,13 @@ export type ScriptPolicyEntry = {
 /**
  * Filesystem RWX access-policy config loaded from `access-policy.json`.
  * Applied per-agent to read, write, and exec tool calls.
+ *
+ * Implicit fallback when no rule matches: `"---"` (deny-all).
+ * To set a permissive default, add a `"/**"` rule (e.g. `"/**": "r--"`).
  */
 export type AccessPolicyConfig = {
-  /** Fallback permission when no rule matches. Defaults to `"---"` (deny-all) when absent. */
-  default?: PermStr;
   /** Glob-pattern rules: path → permission string. Longest prefix wins. */
   rules?: Record<string, PermStr>;
-  /** Patterns that are always denied regardless of rules (additive across merges). */
-  deny?: string[];
   /** Per-script argv0 policy overrides keyed by resolved binary path. */
   scripts?: Record<string, ScriptPolicyEntry>;
 };

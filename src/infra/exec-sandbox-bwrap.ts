@@ -27,11 +27,10 @@ const SYSTEM_RO_BIND_PATHS = ["/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc",
 
 let bwrapAvailableCache: boolean | undefined;
 
-// Warn once per process when a file-specific deny[] entry cannot be enforced at
+// Warn once per process when a file-specific "---" rule cannot be enforced at
 // the OS layer (bwrap --tmpfs only accepts directories). Tool-layer enforcement
 // still applies for read/write/edit tool calls, but exec commands that access
 // the file directly inside the sandbox are not blocked at the syscall level.
-// See docs/tools/access-policy.md — "File-specific deny[] entries on Linux".
 const _bwrapFileDenyWarnedPaths = new Set<string>();
 /** Reset the one-time file-deny warning set. Only for use in tests. */
 export function _resetBwrapFileDenyWarnedPathsForTest(): void {
@@ -43,10 +42,10 @@ export function _warnBwrapFileDenyOnce(filePath: string): void {
   }
   _bwrapFileDenyWarnedPaths.add(filePath);
   console.error(
-    `[access-policy] bwrap: deny[] entry "${filePath}" resolves to a file — ` +
+    `[access-policy] bwrap: "---" rule for "${filePath}" resolves to a file — ` +
       `OS-level (bwrap) enforcement is not applied. ` +
       `Tool-layer enforcement still blocks read/write/edit tool calls. ` +
-      `To protect this file at the OS layer on Linux, deny its parent directory instead.`,
+      `To protect this file at the OS layer on Linux, use a "---" rule on its parent directory instead.`,
   );
 }
 
@@ -119,25 +118,27 @@ function permAllowsWrite(perm: PermStr): boolean {
  * Generate bwrap argument array for the given permissions config.
  *
  * Strategy:
- *   1. Start with --ro-bind / / (read-only view of entire host FS)
- *   2. For each rule with w bit: upgrade to --bind (read-write)
- *   3. For each deny[] entry: overlay with --tmpfs (empty, blocks reads too)
- *   4. Add /tmp and /dev as writable tmpfs mounts (required for most processes)
- *   5. When default is "---": use a more restrictive base (only bind explicit allow paths)
+ *   1. Check the "/**" rule to determine permissive vs restrictive base.
+ *   2. Permissive base (r in "/**"): --ro-bind / / (read-only view of entire host FS).
+ *   3. Restrictive base (no r in "/**"): only bind system paths needed to run processes.
+ *   4. For each rule with w bit: upgrade to --bind (read-write).
+ *   5. For each "---" rule in permissive mode: overlay with --tmpfs to hide the path.
+ *   6. Add /tmp and /dev as writable tmpfs mounts (required for most processes).
  */
 export function generateBwrapArgs(
   config: AccessPolicyConfig,
   homeDir: string = os.homedir(),
   /**
-   * Script-specific override rules to emit AFTER the deny list so they win over
-   * broad deny patterns — mirrors the Seatbelt scriptOverrideRules behaviour.
+   * Script-specific override rules to emit AFTER the base rules so they win over
+   * broader patterns — mirrors the Seatbelt scriptOverrideRules behaviour.
    * In bwrap, later mounts win, so script grants must come last.
    */
   scriptOverrideRules?: Record<string, PermStr>,
 ): string[] {
   const args: string[] = [];
-  const defaultPerm = config.default ?? "---";
-  const defaultAllowsRead = defaultPerm[0] === "r";
+  // Determine base stance from the "/**" catch-all rule (replaces the removed `default` field).
+  const catchAllPerm = findBestRule("/**", config.rules ?? {}, homeDir) ?? "---";
+  const defaultAllowsRead = catchAllPerm[0] === "r";
 
   if (defaultAllowsRead) {
     // Permissive base: everything is read-only by default.
@@ -199,12 +200,12 @@ export function generateBwrapArgs(
       // a restrictive base will also permit reads at the OS layer. The tool layer still
       // denies read tool calls per the rule, so the practical exposure is exec-only paths.
       args.push("--bind-try", p, p);
-    } else if (defaultPerm[0] !== "r" && perm[0] === "r") {
+    } else if (catchAllPerm[0] !== "r" && perm[0] === "r") {
       // Restrictive base: only bind paths that the rule explicitly allows reads on.
       // Do NOT emit --ro-bind-try for "---" or "--x" rules — the base already denies
       // by not mounting; emitting a mount here would grant read access.
       args.push("--ro-bind-try", p, p);
-    } else if (defaultPerm[0] === "r" && perm[0] !== "r") {
+    } else if (catchAllPerm[0] === "r" && perm[0] !== "r") {
       // Permissive base + narrowing rule (no read bit): overlay with tmpfs so the
       // path is hidden even though --ro-bind / / made it readable by default.
       // This mirrors what deny[] does — without this, "---" rules under a permissive
@@ -227,35 +228,7 @@ export function generateBwrapArgs(
     // Permissive base + read-only rule: already covered by --ro-bind / /; no extra mount.
   }
 
-  // deny[] entries: overlay with empty tmpfs — path exists but is empty.
-  // tmpfs overlay hides the real contents regardless of how the path was expressed.
-  // Guard: bwrap --tmpfs only accepts a directory as the mount point. deny[] entries
-  // like "~/.ssh/id_rsa" are unconditionally expanded to "~/.ssh/id_rsa/**" by
-  // validateAccessPolicyConfig and resolve back to the file path here. Passing a
-  // file to --tmpfs causes bwrap to error out ("Not a directory"). Non-existent
-  // paths are assumed to be directories (the common case for protecting future dirs).
-  for (const pattern of config.deny ?? []) {
-    const p = patternToPath(pattern, homeDir);
-    if (!p || p === "/") {
-      continue;
-    }
-    let isDir = true;
-    try {
-      isDir = fs.statSync(p).isDirectory();
-    } catch {
-      // Non-existent path — assume directory (forward-protection for dirs not yet created).
-    }
-    if (isDir) {
-      args.push("--tmpfs", p);
-    } else {
-      // File-specific entry: tool-layer checkAccessPolicy still denies read/write/edit
-      // tool calls, but exec commands inside the sandbox can still access the file
-      // directly. Warn operators so they know to deny the parent directory instead.
-      _warnBwrapFileDenyOnce(p);
-    }
-  }
-
-  // Script-specific override mounts — emitted after deny[] so they can reopen
+  // Script-specific override mounts — emitted after base rules so they can reopen
   // a base-denied path for a trusted script (same precedence as Seatbelt).
   if (scriptOverrideRules) {
     const overrideEntries = Object.entries(scriptOverrideRules).toSorted(([a], [b]) => {

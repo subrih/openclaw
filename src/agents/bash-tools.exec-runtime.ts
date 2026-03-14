@@ -384,30 +384,15 @@ export async function runExecProcess(opts: {
     // enforcement (seatbelt/bwrap) is unavailable (Linux without bwrap, Windows).
     // Mirrors the checkAccessPolicy calls in read/write tools for consistency.
     //
-    // deny[] always wins — checked unconditionally even for scripts{} entries.
-    // The hash check authorises the policy overlay (effectivePermissions), not exec
-    // itself. A script in both deny[] and scripts{} is a config error; the deny wins.
-    // For scripts{} entries not in deny[], we skip the broader rules/default check
-    // so a sha256-matched script doesn't also need an explicit exec rule in the base policy.
+    // For scripts{} entries, skip the broader rules check — a sha256-matched script
+    // doesn't also need an explicit exec rule in the base policy.
     // Use resolveScriptKey so that both tilde keys ("~/bin/deploy.sh") and
     // symlink keys ("/usr/bin/python" → /usr/bin/python3.12) match argv0, which
-    // is always the realpathSync result from resolveArgv0. Without symlink
-    // resolution, a symlink-keyed script would silently bypass the override gate,
-    // running under the base policy with no integrity or deny-narrowing checks.
+    // is always the realpathSync result from resolveArgv0.
     const _scripts = opts.permissions.scripts ?? {};
     const hasScriptOverride = Object.keys(_scripts).some(
       (k) => path.normalize(resolveScriptKey(k)) === path.normalize(argv0),
     );
-    // Use default:"rwx" so only actual deny-pattern hits produce "deny".
-    // Without a default, permAllows(undefined, "exec") → false → every path
-    // not matched by a deny pattern would be incorrectly blocked.
-    const denyVerdict = checkAccessPolicy(argv0, "exec", {
-      deny: opts.permissions.deny,
-      default: "rwx",
-    });
-    if (denyVerdict === "deny") {
-      throw new Error(`exec denied by access policy: ${argv0}`);
-    }
     if (!hasScriptOverride && checkAccessPolicy(argv0, "exec", effectivePermissions) === "deny") {
       throw new Error(`exec denied by access policy: ${argv0}`);
     }
